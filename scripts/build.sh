@@ -37,3 +37,12 @@ zip -r "$OUT" \
   > /dev/null
 
 echo "Built $OUT ($(du -h "$OUT" | cut -f1))"
+
+# Also build a .crx if the signing tool's deps are available.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 -c "from cryptography.hazmat.primitives.asymmetric import rsa" >/dev/null 2>&1; then
+    python3 "$(dirname "$0")/build-crx.py"
+  else
+    echo "(skip .crx: pip install cryptography to enable)"
+  fi
+fi

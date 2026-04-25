@@ -1,43 +1,47 @@
 FliggyClaim 报销助手 - 安装说明
 ================================
 
-A. 一键安装（推荐）
---------------------
-解压 zip 后进入目录，根据系统执行：
+发行包内容
+----------
+  fliggyclaim-<version>.crx        CRX 打包文件（推荐，可直接拖入安装）
+  fliggyclaim-<version>.zip        解压版（用于 Load unpacked 或团队定制）
+  scripts/install.sh / install.ps1 一键启动器（不写入 Chrome 永久扩展）
 
+A. 用 .crx 安装（推荐）
+-----------------------
+  1. 打开 chrome://extensions/
+  2. 右上角打开「开发者模式」
+  3. 把 fliggyclaim-<version>.crx 直接拖到该页面里
+  4. 点「添加扩展程序」即可
+
+注意：稳定版 Chrome 在拖入第三方 .crx 时可能提示
+「无法添加此项中的扩展程序」。如果遇到，使用方案 B。
+
+B. 用 zip 解压后「加载已解压的扩展程序」
+----------------------------------------
+  1. 解压 fliggyclaim-<version>.zip 到任意目录
+  2. 打开 chrome://extensions/，开启「开发者模式」
+  3. 点「加载已解压的扩展程序」，选择解压目录即可
+
+C. 一键启动器（不需要在 chrome://extensions 操作）
+--------------------------------------------------
   macOS / Linux：
       bash scripts/install.sh
 
   Windows（PowerShell）：
       PowerShell -ExecutionPolicy Bypass -File scripts\install.ps1
 
-脚本会：
-  1. 把扩展拷贝到 ~/.fliggyclaim/extension（一个稳定路径）
-  2. 生成桌面/家目录下的启动器（.command / .cmd）
-  3. 立即用 --load-extension 启动 Chrome 加载本扩展
+脚本会把扩展拷贝到 ~/.fliggyclaim/extension，并生成可双击的启动器，
+以 --load-extension 方式加载本扩展打开 Chrome（适合临时使用）。
 
-之后每次需要使用，双击启动器即可（不影响你日常使用 Chrome）。
-
-B. 永久安装（手动一次）
------------------------
-如果希望扩展常驻 Chrome（不需要每次走启动器）：
-
-  1. 打开 chrome://extensions/
-  2. 右上角打开「开发者模式」
-  3. 点「加载已解压的扩展程序」，选择以下任一目录：
-       - 安装脚本生成的：~/.fliggyclaim/extension
-       - 或本 zip 解压后的根目录
-
-C. 关于「完全静默自动安装」
+D. 关于「完全静默自动安装」
 ---------------------------
-出于安全限制，稳定版 Chrome 自 2014 年起禁止本地 .crx 静默安装非 Web Store 扩展。
-完全无人工介入的安装只在以下场景可用：
+出于安全限制，稳定版 Chrome 自 2014 年起禁止本地 .crx 静默安装非
+Web Store 扩展。完全无人工介入的安装只在以下场景可用：
 
-  - 上架 Chrome Web Store（推荐用于团队/公司分发）
+  - 上架 Chrome Web Store
   - 企业受管设备 + ExtensionInstallForcelist 策略
   - Chrome Dev / Canary 通道
-
-本插件目前未上架，因此提供 A、B 两种方式。
 
 使用
 ----
