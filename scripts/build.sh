@@ -38,6 +38,22 @@ zip -r "$OUT" \
 
 echo "Built $OUT ($(du -h "$OUT" | cut -f1))"
 
+# Web Store variant: strips the `key` field (the Store assigns its own key).
+STORE_OUT="dist/${NAME}-webstore.zip"
+rm -f "$STORE_OUT"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+cp -R manifest.json background content icons lib options popup "$TMP_DIR/"
+python3 -c "
+import json, pathlib
+p = pathlib.Path('$TMP_DIR/manifest.json')
+m = json.loads(p.read_text())
+m.pop('key', None)
+p.write_text(json.dumps(m, indent=2, ensure_ascii=False))
+"
+( cd "$TMP_DIR" && zip -r "$ROOT/$STORE_OUT" . -x "*.DS_Store" -x "*/.*" > /dev/null )
+echo "Built $STORE_OUT ($(du -h "$STORE_OUT" | cut -f1))  ← upload this to Web Store"
+
 # Also build a .crx if the signing tool's deps are available.
 if command -v python3 >/dev/null 2>&1; then
   if python3 -c "from cryptography.hazmat.primitives.asymmetric import rsa" >/dev/null 2>&1; then
