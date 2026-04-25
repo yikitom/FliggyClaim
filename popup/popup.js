@@ -218,6 +218,10 @@ async function parseAll() {
   setTimeout(() => {
     $("#parseProgress").hidden = true;
   }, 600);
+  // Release the tesseract worker (~150MB) once the batch is done.
+  if (FliggyParser.terminateOcr) {
+    FliggyParser.terminateOcr().catch(() => {});
+  }
   toast(`解析完成，共 ${newRecords.length} 条`);
   switchTab("parsed");
 }
