@@ -20,7 +20,9 @@
   }
 
   const log = (...a) => console.log("%c[FliggyClaim]", "color:#d71e1e;font-weight:bold", ...a);
-  const warn = (...a) => console.warn("%c[FliggyClaim]", "color:#d71e1e;font-weight:bold", ...a);
+  // Use console.log (not console.warn) so non-fatal "skip and fall back" notices
+  // don't show up as red errors on chrome://extensions.
+  const warn = (...a) => console.log("%c[FliggyClaim]%c warn:", "color:#d71e1e;font-weight:bold", "color:#b06000;font-weight:bold", ...a);
 
   log("content script loaded on", location.href, "frame:", window.top === window ? "top" : "iframe");
 
