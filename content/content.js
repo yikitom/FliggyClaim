@@ -1,36 +1,64 @@
 /*
  * Content script for the Alibaba expense system.
  *
- * Listens for FLIGGY_FILL / FLIGGY_DIAG / FLIGGY_PING messages.
+ * Class names on the actual page are unknown / can change between builds,
+ * so this script does NOT rely on them. It uses two strategies in order:
  *
- * Selectors are kept permissive and grouped so they're easy to tweak.
- * Run "诊断" in the popup to print + copy a form structure report
- * that helps tune selectors for the actual page.
+ *   1. Label-anchored filling. Find labels with text like "类型 / 发生日期 /
+ *      费用金额 / 备注" and grab the nearest input/select. Works for any
+ *      framework (Antd, Fusion, custom).
+ *
+ *   2. Visual-proximity grouping. Cluster all visible inputs by Y-coordinate;
+ *      take the latest cluster as one row. Used as a fallback when label
+ *      anchoring misses some fields.
+ *
+ * For each record we click "新增" first (best-effort, tolerates absence) then
+ * fill the latest row using the strategies above.
  */
 
 (() => {
-  if (window.__fliggyClaimInjected) return;
-  window.__fliggyClaimInjected = true;
+  if (window.__fliggyClaimInjected) {
+    // Even if already injected, make sure we have the latest message handler
+    // (the old one may have died across extension reloads).
+    window.__fliggyClaimInjected = "reused";
+  } else {
+    window.__fliggyClaimInjected = true;
+  }
 
   const log = (...a) => console.log("%c[FliggyClaim]", "color:#d71e1e;font-weight:bold", ...a);
   const warn = (...a) => console.warn("%c[FliggyClaim]", "color:#d71e1e;font-weight:bold", ...a);
 
-  log("content script loaded on", location.href);
+  log("content script loaded on", location.href, "frame:", window.top === window ? "top" : "iframe");
 
-  const TYPE_LABELS = {
+  // Field labels we recognize, ordered by preference.
+  const LABELS = {
+    type: ["费用类型", "类型", "类别", "Category", "Type", "费用项目"],
+    date: ["发生日期", "消费日期", "费用日期", "日期", "Date", "Occurrence Date"],
+    currency: ["币种", "货币", "Currency"],
+    amount: ["费用金额", "金额", "Amount", "总金额", "应付金额"],
+    note: ["备注", "说明", "事由", "用途", "Remark", "Note", "Description"],
+  };
+
+  const TYPE_TEXTS = {
     flight: ["机票", "国内机票", "国际机票", "Air Ticket", "Flight", "飞机"],
     hotel: ["酒店", "住宿", "Hotel", "Accommodation", "宾馆"],
     meal: ["餐饮", "餐费", "Meal", "Dining", "工作餐", "招待"],
     taxi: ["市内交通", "打车", "出租车", "Taxi", "Local Transport", "网约车"],
-    other: ["其他", "Others", "Misc", "杂费"],
+    other: ["其他", "其它", "Others", "Misc", "杂费"],
   };
 
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Avoid double-binding when re-injected
+  if (!window.__fliggyClaimListenerBound) {
+    window.__fliggyClaimListenerBound = true;
+    chrome.runtime.onMessage.addListener(handleMessage);
+  }
+
+  function handleMessage(msg, _sender, sendResponse) {
     log("received message:", msg?.type);
     if (!msg || !msg.type) return;
 
     if (msg.type === "FLIGGY_PING") {
-      sendResponse({ ok: true, ready: true, url: location.href });
+      sendResponse({ ok: true, ready: true, url: location.href, top: window.top === window });
       return false;
     }
 
@@ -55,78 +83,80 @@
         });
       return true; // async
     }
-  });
+  }
 
   /* ---------- Diagnostics ---------- */
 
   function diagnose() {
-    const report = {
+    const inputs = visibleInputs();
+    return {
       url: location.href,
       title: document.title,
-      candidates: {
-        addButtons: probeAddButtons(),
-        rows: probeRows(),
-        inputs: sampleInputs(),
-        selects: sampleSelects(),
-      },
+      isTop: window.top === window,
       framework: detectFramework(),
+      addButtons: probeAddButtons(),
+      saveButtons: probeSaveButtons(),
+      visibleInputs: inputs.map(describeEl),
+      visibleSelects: visibleSelects().map(describeEl),
+      labels: probeLabels(),
+      groups: groupByYBand(inputs).map((g) => ({
+        y: g[0].rect.top,
+        size: g.length,
+        items: g.map((e) => describeEl(e.el)),
+      })),
     };
-    return report;
   }
 
-  function probeAddButtons() {
-    const all = Array.from(document.querySelectorAll("button, a, [role=button], span"));
-    const matches = all
-      .filter((b) => /新增|添加|Add(?: |Item|Expense|新)?|\+\s*新增/i.test(b.textContent || ""))
-      .slice(0, 20);
-    return matches.map((b) => ({
-      tag: b.tagName.toLowerCase(),
-      text: (b.textContent || "").trim().slice(0, 40),
-      cls: (b.className || "").toString().slice(0, 80),
-      visible: isVisible(b),
-    }));
-  }
-
-  function probeRows() {
-    const sels = [
-      "tr",
-      "li",
-      ".expense-detail-row",
-      ".ant-table-row",
-      ".next-table-row",
-      "[class*=expense] [class*=row]",
-      "[class*=ExpenseDetail] [class*=row]",
-    ];
+  function probeLabels() {
+    const all = Array.from(document.querySelectorAll("label, span, div, dt, p, th"))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim();
+        return t.length > 0 && t.length < 20;
+      });
     const out = {};
-    for (const s of sels) {
-      const els = document.querySelectorAll(s);
-      out[s] = els.length;
+    for (const key of Object.keys(LABELS)) {
+      const matches = all
+        .filter((el) => LABELS[key].some((l) => (el.textContent || "").trim() === l))
+        .slice(0, 5);
+      out[key] = matches.map(describeEl);
     }
     return out;
   }
 
-  function sampleInputs() {
-    const inputs = Array.from(document.querySelectorAll("input, textarea")).slice(0, 40);
-    return inputs.map((el) => ({
-      tag: el.tagName.toLowerCase(),
+  function probeAddButtons() {
+    const all = Array.from(document.querySelectorAll("button, a, [role=button], span, div"))
+      .filter(isVisible);
+    return all
+      .filter((b) => /^\s*\+?\s*(新增|添加|Add|新增明细|新增费用|添加明细|添加费用)\s*$/i.test((b.textContent || "").trim()))
+      .slice(0, 10)
+      .map(describeEl);
+  }
+
+  function probeSaveButtons() {
+    return Array.from(document.querySelectorAll("button, a, [role=button]"))
+      .filter(isVisible)
+      .filter((b) => /^(暂存|保存|保存草稿|Save|Save Draft)$/i.test((b.textContent || "").trim()))
+      .slice(0, 5)
+      .map(describeEl);
+  }
+
+  function describeEl(elOrItem) {
+    const el = elOrItem.el || elOrItem;
+    const tag = el.tagName.toLowerCase();
+    const r = el.getBoundingClientRect();
+    return {
+      tag,
       type: el.getAttribute("type") || "",
       name: el.getAttribute("name") || "",
       id: el.id || "",
       placeholder: el.getAttribute("placeholder") || "",
-      cls: (el.className || "").toString().slice(0, 80),
-      value: (el.value || "").slice(0, 30),
-      visible: isVisible(el),
-    }));
-  }
-
-  function sampleSelects() {
-    const sels = Array.from(document.querySelectorAll("select")).slice(0, 20);
-    return sels.map((el) => ({
-      name: el.getAttribute("name") || "",
-      id: el.id || "",
-      cls: (el.className || "").toString().slice(0, 80),
-      options: Array.from(el.options).slice(0, 8).map((o) => o.textContent),
-    }));
+      ariaLabel: el.getAttribute("aria-label") || "",
+      cls: (el.className || "").toString().slice(0, 100),
+      text: (el.textContent || "").trim().slice(0, 40),
+      value: tag === "input" || tag === "textarea" ? (el.value || "").slice(0, 30) : "",
+      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+    };
   }
 
   function detectFramework() {
@@ -134,20 +164,30 @@
     if (document.querySelector("[class*='ant-']")) hits.push("antd");
     if (document.querySelector("[class*='next-']")) hits.push("alibaba-fusion");
     if (document.querySelector("[data-reactroot], [data-react-helmet]")) hits.push("react");
-    if (document.querySelector("[id^='__nuxt'], [id^='__next']")) hits.push("ssr");
     if (window.Vue || document.querySelector("[data-v-]")) hits.push("vue");
     return hits.length ? hits : ["unknown"];
   }
 
   function isVisible(el) {
-    if (!el) return false;
+    if (!el || !el.getBoundingClientRect) return false;
     const r = el.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return false;
     const s = getComputedStyle(el);
     return s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0";
   }
 
-  /* ---------- Form interaction ---------- */
+  function visibleInputs() {
+    return Array.from(document.querySelectorAll("input, textarea"))
+      .filter((el) => el.type !== "hidden" && el.type !== "file" && !el.disabled)
+      .filter(isVisible)
+      .map((el) => ({ el, rect: el.getBoundingClientRect() }));
+  }
+
+  function visibleSelects() {
+    return Array.from(document.querySelectorAll("select")).filter(isVisible);
+  }
+
+  /* ---------- Fill flow ---------- */
 
   async function fillRecords(records) {
     log(`starting fill: ${records.length} records`);
@@ -156,270 +196,284 @@
     for (let i = 0; i < records.length; i++) {
       const rec = records[i];
       try {
-        await addExpenseRow(rec);
-        filled++;
+        // For records 2+ try to add a new row before filling
+        if (i > 0) await tryClickAddButton();
+        await sleep(300);
+        const ok = await fillOneRecord(rec);
+        if (ok) {
+          filled++;
+          log(`✓ row ${i + 1}/${records.length}:`, rec);
+        } else {
+          warn(`× row ${i + 1}/${records.length}: no fields filled`, rec);
+        }
         showOverlay(`正在写入 ${filled} / ${records.length} 条…`);
-        log(`✓ row ${i + 1}/${records.length}:`, rec);
       } catch (e) {
-        warn(`× row ${i + 1}/${records.length} failed:`, rec, e);
+        warn(`× row ${i + 1}/${records.length} threw:`, rec, e);
       }
       await sleep(400);
     }
     await trySaveDraft();
     hideOverlay(`已写入 ${filled} / ${records.length} 条`);
+    if (filled === 0) {
+      throw new Error("0 条写入成功——请点「诊断」按钮把报告发给开发者");
+    }
     return { filled };
   }
 
-  async function addExpenseRow(rec) {
-    const addBtn = findAddButton();
-    if (addBtn) {
-      log("clicking add-row button:", addBtn);
-      addBtn.click();
-      await waitFor(() => findLatestEditableRow(), 4000).catch(() => null);
-    } else {
-      warn("no add-row button found; falling back to existing last row");
-    }
-    const row = findLatestEditableRow();
-    if (!row) throw new Error("找不到可编辑的费用明细行 (运行「诊断」收集页面结构发给开发者)");
-    log("editing row:", row);
-
-    setTypeField(row, rec.type);
-    await sleep(150);
-    setDateField(row, rec.date);
-    setCurrencyField(row, rec.currency);
-    setAmountField(row, rec.amount);
-    setNoteField(row, rec.note);
-
-    const rowConfirm = row.querySelector(
-      'button[title*="保存"], button[title*="确认"], .row-confirm, .anticon-check',
-    );
-    if (rowConfirm) rowConfirm.click();
-  }
-
-  function findAddButton() {
-    const all = Array.from(document.querySelectorAll("button, a, [role=button], span"));
-    const visible = all.filter(isVisible);
-    return (
-      visible.find((b) =>
-        /^\s*\+?\s*(新增明细|新增费用|添加明细|添加费用|Add Item|Add Expense)\s*$/i.test(
-          (b.textContent || "").trim(),
-        ),
-      ) ||
-      visible.find((b) => /\+\s*新增|新增明细|新增费用|添加明细|添加费用/i.test(b.textContent || "")) ||
-      visible.find((b) => /^\s*\+?\s*新增\s*$/i.test((b.textContent || "").trim())) ||
-      null
-    );
-  }
-
-  function findLatestEditableRow() {
-    const cands = Array.from(
-      document.querySelectorAll(
-        "tr.editable-row, tr.ant-table-row, tr.next-table-row, .expense-detail-row, li.expense-row, [class*='expense'] [class*='row']",
-      ),
-    ).filter((r) => r.querySelector("input, textarea, [contenteditable=true]"));
-    if (cands.length) return cands[cands.length - 1];
-
-    const panel = document.querySelector(
-      '[class*="expense-detail"], [class*="ExpenseDetail"], [class*="expenseDetail"]',
-    );
-    if (panel) {
-      const inner = Array.from(panel.querySelectorAll("tr, li")).filter((r) =>
-        r.querySelector("input, textarea, [contenteditable=true]"),
-      );
-      if (inner.length) return inner[inner.length - 1];
-    }
-    return null;
-  }
-
-  function setTypeField(row, type) {
-    const sel = pickField(row, [
-      'select[name*="type" i]',
-      'select[name*="category" i]',
-      '[data-field="type"] input',
-      '[class*="type" i] input',
-      '[placeholder*="类型" i]',
-      '[placeholder*="类别" i]',
-    ]);
-    if (!sel) {
-      warn("type field not found in row");
-      return;
-    }
-    const labels = TYPE_LABELS[type] || TYPE_LABELS.other;
-    if (sel.tagName === "SELECT") {
-      const opt = Array.from(sel.options).find((o) =>
-        labels.some((l) => (o.textContent || "").includes(l)),
-      );
-      if (opt) {
-        sel.value = opt.value;
-        fireChange(sel);
-      }
-      return;
-    }
-    sel.focus();
-    nativeSetValue(sel, labels[0]);
-    fireInput(sel);
-    setTimeout(() => {
-      const opt = document.querySelector(
-        '.ant-select-item-option, .next-menu-item, [role="option"]',
-      );
-      if (opt) opt.click();
-    }, 100);
-  }
-
-  function setDateField(row, date) {
-    if (!date) return;
-    const el = pickField(row, [
-      'input[type="date"]',
-      'input[placeholder*="日期"]',
-      'input[placeholder*="Date"]',
-      'input[placeholder*="发生日期"]',
-      '[data-field="date"] input',
-      '[class*="date" i] input',
-    ]);
-    if (!el) {
-      warn("date field not found");
-      return;
-    }
-    nativeSetValue(el, date);
-    fireInput(el);
-    fireChange(el);
-  }
-
-  function setCurrencyField(row, currency) {
-    if (!currency) return;
-    const sel = pickField(row, [
-      'select[name*="currency" i]',
-      '[data-field="currency"] input',
-      '[class*="currency" i] input',
-      '[placeholder*="币种" i]',
-    ]);
-    if (!sel) {
-      warn("currency field not found");
-      return;
-    }
-    if (sel.tagName === "SELECT") {
-      const opt = Array.from(sel.options).find(
-        (o) => (o.textContent || "").trim().toUpperCase().includes(currency),
-      );
-      if (opt) {
-        sel.value = opt.value;
-        fireChange(sel);
-      }
-      return;
-    }
-    sel.focus();
-    nativeSetValue(sel, currency);
-    fireInput(sel);
-    setTimeout(() => {
-      const opt = Array.from(
-        document.querySelectorAll(
-          '.ant-select-item-option, .next-menu-item, [role="option"]',
-        ),
-      ).find((o) => (o.textContent || "").toUpperCase().includes(currency));
-      if (opt) opt.click();
-    }, 100);
-  }
-
-  function setAmountField(row, amount) {
-    if (amount == null) return;
-    const el = pickField(row, [
-      'input[type="number"]',
-      'input[placeholder*="金额"]',
-      'input[placeholder*="Amount"]',
-      'input[placeholder*="费用金额"]',
-      '[data-field="amount"] input',
-      '[class*="amount" i] input',
-    ]);
-    if (!el) {
-      warn("amount field not found");
-      return;
-    }
-    nativeSetValue(el, String(amount));
-    fireInput(el);
-    fireChange(el);
-  }
-
-  function setNoteField(row, note) {
-    if (!note) return;
-    const el = pickField(row, [
-      'textarea[placeholder*="备注"]',
-      'input[placeholder*="备注"]',
-      'textarea[placeholder*="Remark"]',
-      'input[placeholder*="Remark"]',
-      '[data-field="remark"] textarea',
-      '[data-field="remark"] input',
-      '[class*="remark" i] textarea',
-      '[class*="remark" i] input',
-    ]);
-    if (!el) {
-      warn("note field not found");
-      return;
-    }
-    nativeSetValue(el, note);
-    fireInput(el);
-    fireChange(el);
-  }
-
-  function pickField(scope, selectors) {
-    for (const s of selectors) {
-      try {
-        const el = scope.querySelector(s);
-        if (el) return el;
-      } catch (e) {
-        // CSS selectors with [name*="x" i] may not parse on old browsers
-      }
-    }
-    return null;
-  }
-
-  async function trySaveDraft() {
-    const btn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /^(暂存|保存|保存草稿|Save Draft|Save)$/i.test((b.textContent || "").trim()),
-    );
-    if (btn && !btn.disabled) {
-      log("clicking save-draft button");
+  async function tryClickAddButton() {
+    const btns = probeAddButtons().map((d) => findElByDescription(d)).filter(Boolean);
+    const btn = btns[0] || findAddByText();
+    if (btn) {
+      log("clicking add-row button:", btn);
       btn.click();
       await sleep(400);
     } else {
-      warn("save-draft button not found");
+      warn("no add-row button found (will try to fill latest row anyway)");
     }
   }
 
-  /* ---------- React/Vue-friendly value setting ---------- */
-  function nativeSetValue(el, value) {
-    const proto =
-      el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  function findAddByText() {
+    return Array.from(document.querySelectorAll("button, a, [role=button], span, div, i"))
+      .filter(isVisible)
+      .find((b) => /\+\s*新增|新增明细|新增费用|添加明细|添加费用|^\+\s*$/i.test((b.textContent || "").trim()));
+  }
+
+  // Convert a description back to a live element (best effort by id+rect)
+  function findElByDescription(d) {
+    if (d.id) {
+      const el = document.getElementById(d.id);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  /* ---------- Per-record filling ---------- */
+
+  async function fillOneRecord(rec) {
+    let touched = 0;
+
+    // Strategy 1: label-anchored
+    const targets = {
+      type: findInputByLabel(LABELS.type),
+      date: findInputByLabel(LABELS.date),
+      currency: findInputByLabel(LABELS.currency),
+      amount: findInputByLabel(LABELS.amount),
+      note: findInputByLabel(LABELS.note),
+    };
+    log("label-anchored targets:", Object.fromEntries(
+      Object.entries(targets).map(([k, v]) => [k, v ? describeEl(v) : null])
+    ));
+
+    if (targets.type && setComboboxValue(targets.type, TYPE_TEXTS[rec.type] || TYPE_TEXTS.other)) touched++;
+    await sleep(120);
+    if (targets.date && setInputValue(targets.date, formatDateForInput(targets.date, rec.date))) touched++;
+    if (targets.currency && setComboboxValue(targets.currency, [rec.currency])) touched++;
+    if (targets.amount && setInputValue(targets.amount, String(rec.amount ?? 0))) touched++;
+    if (targets.note && setInputValue(targets.note, rec.note || "")) touched++;
+
+    // Strategy 2: if some labels failed, use proximity grouping for the latest row
+    const missing = ["type", "date", "currency", "amount", "note"].filter((k) => !targets[k]);
+    if (missing.length) {
+      const latest = latestInputCluster();
+      if (latest && latest.length) {
+        log("proximity fallback row:", latest.map((e) => describeEl(e.el)));
+        // Heuristic: pick by input/placeholder type
+        const candidates = latest.map((e) => e.el);
+        for (const key of missing) {
+          const guess = guessFieldFromCandidates(key, candidates);
+          if (!guess) continue;
+          if (key === "type" && setComboboxValue(guess, TYPE_TEXTS[rec.type] || TYPE_TEXTS.other)) touched++;
+          else if (key === "date" && setInputValue(guess, formatDateForInput(guess, rec.date))) touched++;
+          else if (key === "currency" && setComboboxValue(guess, [rec.currency])) touched++;
+          else if (key === "amount" && setInputValue(guess, String(rec.amount ?? 0))) touched++;
+          else if (key === "note" && setInputValue(guess, rec.note || "")) touched++;
+        }
+      }
+    }
+
+    return touched > 0;
+  }
+
+  function findInputByLabel(labelTexts) {
+    const labelEls = Array.from(document.querySelectorAll("label, span, div, dt, p, th"))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim();
+        return labelTexts.some((l) => t === l || t === l + ":" || t === l + "：" || t === "*" + l);
+      });
+
+    for (const lbl of labelEls) {
+      // 1) <label for="..."> direct mapping
+      const forId = lbl.getAttribute && lbl.getAttribute("for");
+      if (forId) {
+        const target = document.getElementById(forId);
+        if (target && isVisible(target)) return target;
+      }
+      // 2) Look in nextElementSibling chain
+      let cur = lbl;
+      for (let i = 0; i < 4 && cur; i++) {
+        cur = cur.nextElementSibling;
+        if (!cur) break;
+        const inp = findFillableInside(cur);
+        if (inp) return inp;
+      }
+      // 3) Look at parent's siblings
+      let parent = lbl.parentElement;
+      for (let i = 0; i < 3 && parent; i++) {
+        let sib = parent.nextElementSibling;
+        for (let j = 0; j < 3 && sib; j++) {
+          const inp = findFillableInside(sib);
+          if (inp) return inp;
+          sib = sib.nextElementSibling;
+        }
+        parent = parent.parentElement;
+      }
+      // 4) Same parent, any input
+      const sameParent = lbl.parentElement && findFillableInside(lbl.parentElement);
+      if (sameParent && sameParent !== lbl) return sameParent;
+    }
+    return null;
+  }
+
+  function findFillableInside(scope) {
+    if (!scope || !scope.querySelector) return null;
+    return scope.querySelector(
+      'input:not([type="hidden"]):not([type="file"]):not([disabled]), textarea:not([disabled]), select:not([disabled])',
+    );
+  }
+
+  /* ---------- Visual proximity grouping ---------- */
+
+  function latestInputCluster() {
+    const groups = groupByYBand(visibleInputs());
+    if (!groups.length) return null;
+    return groups[groups.length - 1];
+  }
+
+  function groupByYBand(items, band = 36) {
+    const sorted = [...items].sort((a, b) => a.rect.top - b.rect.top);
+    const groups = [];
+    for (const it of sorted) {
+      const g = groups[groups.length - 1];
+      if (g && Math.abs(it.rect.top - g[0].rect.top) <= band) g.push(it);
+      else groups.push([it]);
+    }
+    return groups;
+  }
+
+  function guessFieldFromCandidates(key, els) {
+    // amount: number-typed input or placeholder containing 金额/Amount
+    if (key === "amount") {
+      return els.find((el) => el.type === "number" || /金额|Amount/i.test(el.placeholder || el.getAttribute("aria-label") || ""));
+    }
+    if (key === "date") {
+      return els.find((el) => el.type === "date" || /日期|Date/i.test(el.placeholder || el.getAttribute("aria-label") || ""));
+    }
+    if (key === "note") {
+      return els.find((el) => el.tagName === "TEXTAREA" || /备注|说明|Remark|Note/i.test(el.placeholder || ""));
+    }
+    if (key === "type") {
+      return els.find((el) => /类型|类别|Type|Category/i.test(el.placeholder || el.getAttribute("aria-label") || ""));
+    }
+    if (key === "currency") {
+      return els.find((el) => /币种|货币|Currency|CNY|USD/i.test(el.placeholder || el.getAttribute("aria-label") || el.value || ""));
+    }
+    return null;
+  }
+
+  /* ---------- Field setters ---------- */
+
+  function formatDateForInput(el, iso) {
+    if (!iso) return iso;
+    if (el.type === "date") return iso; // YYYY-MM-DD
+    // Many UI date pickers accept YYYY/MM/DD or YYYY-MM-DD
+    return iso.replaceAll("-", "/");
+  }
+
+  function setInputValue(el, value) {
+    if (!el) return false;
+    try {
+      el.focus();
+      const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      if (setter) setter.call(el, value);
+      else el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Event("blur", { bubbles: true }));
+      return true;
+    } catch (e) {
+      warn("setInputValue failed:", e);
+      return false;
+    }
+  }
+
+  function setComboboxValue(el, candidateTexts) {
+    if (!el) return false;
+    if (el.tagName === "SELECT") {
+      const opt = Array.from(el.options).find((o) =>
+        candidateTexts.some((t) => (o.textContent || "").includes(t)),
+      );
+      if (!opt) return false;
+      el.value = opt.value;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    // Combobox: focus, type, then click matching dropdown option
+    el.focus();
+    const proto = HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-    if (setter) setter.call(el, value);
-    else el.value = value;
-  }
-  function fireInput(el) {
+    if (setter) setter.call(el, candidateTexts[0]);
+    else el.value = candidateTexts[0];
     el.dispatchEvent(new Event("input", { bubbles: true }));
+
+    // Trigger arrow-down to open dropdown for some pickers
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        const opts = Array.from(
+          document.querySelectorAll(
+            '[role="option"], .ant-select-item-option, .next-menu-item, [class*="option"][class*="item"]',
+          ),
+        ).filter(isVisible);
+        const opt = opts.find((o) =>
+          candidateTexts.some((t) => (o.textContent || "").includes(t)),
+        );
+        if (opt) {
+          opt.click();
+          resolve(true);
+        } else {
+          // Try Enter to confirm typed value
+          el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+          resolve(true);
+        }
+      }, 180);
+    });
   }
-  function fireChange(el) {
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+
+  async function trySaveDraft() {
+    const btn = Array.from(document.querySelectorAll("button, a, [role=button]"))
+      .filter(isVisible)
+      .find((b) => /^(暂存|保存|保存草稿|Save Draft|Save)$/i.test((b.textContent || "").trim()));
+    if (btn && !btn.disabled) {
+      log("clicking save-draft button:", btn);
+      btn.click();
+      await sleep(400);
+    } else {
+      warn("save-draft button not found (skipping; user can save manually)");
+    }
   }
 
   /* ---------- Helpers ---------- */
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
-  function waitFor(fn, timeout = 3000) {
-    return new Promise((resolve, reject) => {
-      const start = Date.now();
-      const tick = () => {
-        const r = fn();
-        if (r) return resolve(r);
-        if (Date.now() - start > timeout) return reject(new Error("timeout"));
-        requestAnimationFrame(tick);
-      };
-      tick();
-    });
-  }
 
   /* ---------- Overlay ---------- */
   let overlayEl = null;
   function showOverlay(msg) {
+    if (window.top !== window) return; // overlay only in top frame
     if (!overlayEl) {
       overlayEl = document.createElement("div");
       overlayEl.className = "fliggy-overlay";

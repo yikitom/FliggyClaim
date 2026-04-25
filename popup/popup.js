@@ -371,7 +371,7 @@ async function ensureContentScript(tabId) {
   console.log("[FliggyClaim] injecting content script into tab", tabId);
   try {
     await chrome.scripting.insertCSS({
-      target: { tabId, allFrames: false },
+      target: { tabId, allFrames: true },
       files: ["content/content.css"],
     });
   } catch (e) {

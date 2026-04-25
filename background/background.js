@@ -16,13 +16,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     for (const tab of tabs) {
       try {
         await chrome.scripting.insertCSS({
-          target: { tabId: tab.id, allFrames: false },
+          target: { tabId: tab.id, allFrames: true },
           files: ["content/content.css"],
         });
       } catch {}
       try {
         await chrome.scripting.executeScript({
-          target: { tabId: tab.id, allFrames: false },
+          target: { tabId: tab.id, allFrames: true },
           files: ["content/content.js"],
         });
         console.log("[FliggyClaim bg] re-injected into tab", tab.id);
