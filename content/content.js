@@ -41,6 +41,8 @@
     city: ["费用发生城市", "发生城市", "城市"],
     amount: ["金额", "费用金额", "总金额"],
     currency: ["币种", "货币", "Currency"],
+    rate: ["汇率", "Exchange Rate"],
+    convertedAmount: ["折算金额", "本位币金额", "报销金额", "申请金额"],
     note: ["详细说明", "备注", "说明", "事由"],
     rideshare: ["是否网约车"],
     flightFrom: ["出发城市", "出发地"],
@@ -289,18 +291,60 @@
       if (yes) clickEl(yes);
     }
 
-    // Amount
-    const amt = findInputByLabel(form, LABELS.amount);
-    if (amt) setInputValue(amt, String(rec.amount ?? 0));
-    else warn("amount label not found in form");
-
-    // Currency – form usually defaults to SGD; force-change
+    // Currency MUST be set before amount: TAE clears the amount field
+    // when the currency changes (and re-fetches the FX rate against the
+    // report's base currency). Filling amount first would be silently wiped.
     const cur = findInputByLabel(form, LABELS.currency);
-    if (cur) await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
+    if (cur) {
+      await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
+      // Give TAE time to fire the FX-rate request triggered by the change.
+      await sleep(450);
+    }
+
+    // Amount – set after currency, then nudge the form to recompute the
+    // converted (本位币) amount.
+    const amt = findInputByLabel(form, LABELS.amount);
+    if (amt) {
+      setInputValue(amt, String(rec.amount ?? 0));
+      await sleep(120);
+      // Explicit blur + change re-fires the FX recalculation in TAE.
+      try {
+        amt.dispatchEvent(new Event("change", { bubbles: true }));
+        amt.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+      } catch {}
+      // Click outside the field to dismiss any popover that might be
+      // suppressing the rate fetch.
+      document.body.click();
+      // Wait briefly for the FX rate / converted amount to populate.
+      await waitForRatePopulated(form, 2500);
+    } else {
+      warn("amount label not found in form");
+    }
 
     // Note / 详细说明
     const note = findInputByLabel(form, LABELS.note);
     if (note) setInputValue(note, rec.note || "");
+  }
+
+  // Poll the form for a non-zero exchange rate or converted amount.
+  // When the record's currency equals the report base currency, both fields
+  // are usually absent — in that case we just return after the timeout.
+  async function waitForRatePopulated(form, timeoutMs) {
+    const start = Date.now();
+    const looksFilled = (el) => {
+      if (!el) return false;
+      const v = (el.value ?? el.textContent ?? "").toString().trim();
+      if (!v) return false;
+      const n = parseFloat(v.replace(/,/g, ""));
+      return !isNaN(n) && n > 0;
+    };
+    while (Date.now() - start < timeoutMs) {
+      const rateEl = findInputByLabel(form, LABELS.rate);
+      const convEl = findInputByLabel(form, LABELS.convertedAmount);
+      if (looksFilled(rateEl) || looksFilled(convEl)) return true;
+      await sleep(120);
+    }
+    return false;
   }
 
   function currencyDisplay(code) {
