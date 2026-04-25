@@ -372,6 +372,75 @@ def make_scene(headline, subhead, popup_state="empty", popup_drag=False, with_ov
     return canvas_rgba.convert("RGB")
 
 
+def make_promo_tile(size=(440, 280)) -> Image.Image:
+    """Small promotional tile for the Web Store listing (440x280)."""
+    w, h = size
+    canvas = gradient(size, (255, 100, 90), (190, 25, 25)).convert("RGBA")
+
+    # decorative circles
+    blob = Image.new("RGBA", size, (0, 0, 0, 0))
+    bd = ImageDraw.Draw(blob)
+    bd.ellipse((-80, -120, 220, 180), fill=(255, 255, 255, 28))
+    bd.ellipse((w - 200, h - 120, w + 100, h + 180), fill=(255, 255, 255, 18))
+    blob = blob.filter(ImageFilter.GaussianBlur(20))
+    canvas.alpha_composite(blob)
+
+    d = ImageDraw.Draw(canvas)
+
+    # 报 mark (rounded square, white on red gradient)
+    mark_size = 88
+    mx = 30
+    my = (h - mark_size) // 2
+    inner = gradient((mark_size, mark_size), (255, 255, 255, 255), (245, 245, 245, 255))
+    inner = inner.convert("RGBA")
+    mask = Image.new("L", (mark_size, mark_size), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, mark_size, mark_size), radius=22, fill=255)
+    canvas.paste(inner, (mx, my), mask)
+    # the 报 character
+    f_glyph = font(64)
+    d.text((mx + mark_size / 2, my + mark_size / 2 + 2), "报",
+           fill=(215, 30, 30), font=f_glyph, anchor="mm")
+
+    # Title block
+    tx = mx + mark_size + 22
+    d.text((tx, 96), "FliggyClaim", fill="white", font=font(34), anchor="lm")
+    d.text((tx, 138), "报销助手", fill=(255, 255, 255, 240), font=font(22), anchor="lm")
+    d.text((tx, 188), "拍照 → 解析 → 一键导入", fill=(255, 255, 255, 220),
+           font=font(16), anchor="lm")
+
+    return canvas.convert("RGB")
+
+
+def make_marquee(size=(1400, 560)) -> Image.Image:
+    """Optional marquee promotional tile."""
+    w, h = size
+    canvas = gradient(size, (255, 100, 90), (180, 20, 20)).convert("RGBA")
+    blob = Image.new("RGBA", size, (0, 0, 0, 0))
+    bd = ImageDraw.Draw(blob)
+    bd.ellipse((-200, -300, 600, 500), fill=(255, 255, 255, 28))
+    bd.ellipse((w - 400, h - 300, w + 200, h + 500), fill=(255, 255, 255, 16))
+    blob = blob.filter(ImageFilter.GaussianBlur(40))
+    canvas.alpha_composite(blob)
+    d = ImageDraw.Draw(canvas)
+
+    # mark
+    ms = 180
+    mx, my = 90, (h - ms) // 2
+    inner = Image.new("RGBA", (ms, ms), (255, 255, 255, 255))
+    mask = Image.new("L", (ms, ms), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, ms, ms), radius=44, fill=255)
+    canvas.paste(inner, (mx, my), mask)
+    d.text((mx + ms / 2, my + ms / 2 + 4), "报", fill=(215, 30, 30), font=font(140), anchor="mm")
+
+    # text
+    tx = mx + ms + 60
+    d.text((tx, 200), "FliggyClaim 报销助手", fill="white", font=font(64), anchor="lm")
+    d.text((tx, 280), "拍好凭证，AI 自动解析，一键填进飞猪报销系统", fill="white", font=font(28), anchor="lm")
+    d.text((tx, 340), "支持 PDF / 图片 · 类型 / 日期 / 金额 / 备注全识别", fill=(255, 255, 255, 220), font=font(22), anchor="lm")
+
+    return canvas.convert("RGB")
+
+
 def main() -> int:
     scenes = [
         # 1. Hero - empty
@@ -406,6 +475,16 @@ def main() -> int:
         out = OUT / f"{name}.png"
         img.save(out, "PNG", optimize=True)
         print(f"  {out.relative_to(ROOT)}  ({out.stat().st_size // 1024} KB)")
+
+    promo = make_promo_tile()
+    promo_path = OUT / "promo-tile-440x280.png"
+    promo.save(promo_path, "PNG", optimize=True)
+    print(f"  {promo_path.relative_to(ROOT)}  ({promo_path.stat().st_size // 1024} KB)")
+
+    marquee = make_marquee()
+    marquee_path = OUT / "marquee-1400x560.png"
+    marquee.save(marquee_path, "PNG", optimize=True)
+    print(f"  {marquee_path.relative_to(ROOT)}  ({marquee_path.stat().st_size // 1024} KB)")
 
     return 0
 
