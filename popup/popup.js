@@ -225,6 +225,7 @@ async function parseAll() {
 /* ---------- Parsed ---------- */
 function bindParsedActions() {
   $("#importBtn").addEventListener("click", importToSystem);
+  $("#diagBtn").addEventListener("click", runDiagnostics);
 }
 
 async function restoreParsed() {
@@ -358,21 +359,52 @@ async function importToSystem() {
       return;
     }
 
+    console.log("[FliggyClaim] sending FLIGGY_FILL to tab", tab.id, tab.url);
     const resp = await chrome.tabs.sendMessage(tab.id, {
       type: "FLIGGY_FILL",
       records: state.records,
     });
+    console.log("[FliggyClaim] FLIGGY_FILL response:", resp);
 
     if (resp && resp.ok) {
       toast(`已写入 ${resp.filled} 条到报销系统`);
     } else {
-      toast(resp?.error || "写入失败，可手动复制核对", "error");
+      toast(resp?.error || "写入失败，请打开 DevTools 查看日志", "error");
     }
   } catch (err) {
-    console.error(err);
-    toast("注入失败，请刷新报销页面后重试", "error");
+    console.error("[FliggyClaim] import error:", err);
+    toast("注入失败：" + (err?.message || "请刷新报销页面后重试"), "error");
   } finally {
     $("#importBtn").disabled = state.records.length === 0;
+  }
+}
+
+async function runDiagnostics() {
+  try {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    if (!tab || !/alibaba-inc\.com\/expense\//.test(tab.url || "")) {
+      toast("请在报销系统页面打开此插件", "error");
+      return;
+    }
+    const resp = await chrome.tabs.sendMessage(tab.id, { type: "FLIGGY_DIAG" });
+    console.log("[FliggyClaim] diagnostic response:", resp);
+    if (resp && resp.ok) {
+      const text = JSON.stringify(resp.report, null, 2);
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("诊断报告已复制到剪贴板，把它发给我即可");
+      } catch {
+        toast("诊断完成，请打开 DevTools 控制台查看报告");
+      }
+    } else {
+      toast(resp?.error || "诊断失败：内容脚本未响应（请刷新页面）", "error");
+    }
+  } catch (err) {
+    console.error("[FliggyClaim] diag error:", err);
+    toast("诊断失败：" + (err?.message || "请刷新报销页面"), "error");
   }
 }
 

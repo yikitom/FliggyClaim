@@ -1,6 +1,6 @@
 // Service worker for FliggyClaim.
-// The popup talks to the content script directly via tabs.sendMessage,
-// so this worker only handles housekeeping for now.
+// 1. Open side panel when the toolbar icon is clicked.
+// 2. Forward open-options messages from popup.
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install") {
@@ -10,7 +10,13 @@ chrome.runtime.onInstalled.addListener((details) => {
   }
 });
 
-// Allow opening options page via the popup's gear button.
+// Open the side panel automatically on action click.
+if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((err) => console.warn("[FliggyClaim] sidePanel behavior:", err));
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "FLIGGY_OPEN_OPTIONS") {
     chrome.runtime.openOptionsPage();
