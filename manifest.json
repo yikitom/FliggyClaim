@@ -24,7 +24,7 @@
     "service_worker": "background/background.js",
     "type": "module"
   },
-  "permissions": ["storage", "scripting", "activeTab"],
+  "permissions": ["storage", "activeTab"],
   "host_permissions": [
     "https://tae.alibaba-inc.com/*",
     "https://*.alibaba-inc.com/*"
