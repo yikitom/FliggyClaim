@@ -7,21 +7,6 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <header class="title-bar">
-      <div class="brand">
-        <span class="brand-mark"></span>
-        <span class="brand-name">FliggyClaim</span>
-      </div>
-      <button class="icon-btn" id="settingsBtn" title="设置" aria-label="设置">
-        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-          <path
-            fill="currentColor"
-            d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9.43 3.5c0 .47-.04.93-.1 1.39l2.05 1.6a.5.5 0 0 1 .12.62l-1.94 3.36a.5.5 0 0 1-.6.22l-2.4-.96a7.5 7.5 0 0 1-2.4 1.39l-.36 2.55a.5.5 0 0 1-.5.43h-3.88a.5.5 0 0 1-.5-.43l-.36-2.55a7.5 7.5 0 0 1-2.4-1.39l-2.4.96a.5.5 0 0 1-.6-.22L1.6 15.61a.5.5 0 0 1 .12-.62l2.05-1.6c-.06-.46-.1-.92-.1-1.39 0-.47.04-.93.1-1.39L1.72 9.01a.5.5 0 0 1-.12-.62l1.94-3.36a.5.5 0 0 1 .6-.22l2.4.96a7.5 7.5 0 0 1 2.4-1.39l.36-2.55a.5.5 0 0 1 .5-.43h3.88a.5.5 0 0 1 .5.43l.36 2.55a7.5 7.5 0 0 1 2.4 1.39l2.4-.96a.5.5 0 0 1 .6.22l1.94 3.36a.5.5 0 0 1-.12.62l-2.05 1.6c.06.46.1.92.1 1.39Z"
-          />
-        </svg>
-      </button>
-    </header>
-
     <nav class="segmented" role="tablist">
       <button class="seg-btn is-active" role="tab" data-tab="upload" id="tabUpload">
         上传凭证
@@ -29,6 +14,14 @@
       <button class="seg-btn" role="tab" data-tab="parsed" id="tabParsed">
         费用明细
         <span class="badge" id="parsedBadge" hidden>0</span>
+      </button>
+      <button class="icon-btn" id="settingsBtn" title="设置" aria-label="设置">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9.43 3.5c0 .47-.04.93-.1 1.39l2.05 1.6a.5.5 0 0 1 .12.62l-1.94 3.36a.5.5 0 0 1-.6.22l-2.4-.96a7.5 7.5 0 0 1-2.4 1.39l-.36 2.55a.5.5 0 0 1-.5.43h-3.88a.5.5 0 0 1-.5-.43l-.36-2.55a7.5 7.5 0 0 1-2.4-1.39l-2.4.96a.5.5 0 0 1-.6-.22L1.6 15.61a.5.5 0 0 1 .12-.62l2.05-1.6c-.06-.46-.1-.92-.1-1.39 0-.47.04-.93.1-1.39L1.72 9.01a.5.5 0 0 1-.12-.62l1.94-3.36a.5.5 0 0 1 .6-.22l2.4.96a7.5 7.5 0 0 1 2.4-1.39l.36-2.55a.5.5 0 0 1 .5-.43h3.88a.5.5 0 0 1 .5.43l.36 2.55a7.5 7.5 0 0 1 2.4 1.39l2.4-.96a.5.5 0 0 1 .6.22l1.94 3.36a.5.5 0 0 1-.12.62l-2.05 1.6c.06.46.1.92.1 1.39Z"
+          />
+        </svg>
       </button>
     </nav>
 

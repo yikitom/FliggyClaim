@@ -196,9 +196,15 @@
     for (let i = 0; i < records.length; i++) {
       const rec = records[i];
       try {
-        // For records 2+ try to add a new row before filling
-        if (i > 0) await tryClickAddButton();
-        await sleep(300);
+        // For every record, ensure there's a fresh empty row to fill into.
+        // If the table already has an empty row (typical for a fresh form),
+        // use it; otherwise click 新增费用 to add one.
+        const tableInfo = findExpenseTable();
+        const needAdd = !tableInfo || !findEmptyRowInTable(tableInfo);
+        if (needAdd) {
+          await tryClickAddButton();
+          await sleep(500);
+        }
         const ok = await fillOneRecord(rec);
         if (ok) {
           filled++;
@@ -210,7 +216,7 @@
       } catch (e) {
         warn(`× row ${i + 1}/${records.length} threw:`, rec, e);
       }
-      await sleep(400);
+      await sleep(450);
     }
     await trySaveDraft();
     hideOverlay(`已写入 ${filled} / ${records.length} 条`);
@@ -221,21 +227,35 @@
   }
 
   async function tryClickAddButton() {
-    const btns = probeAddButtons().map((d) => findElByDescription(d)).filter(Boolean);
-    const btn = btns[0] || findAddByText();
+    const btn = findAddByText();
     if (btn) {
       log("clicking add-row button:", btn);
-      btn.click();
-      await sleep(400);
+      clickEl(btn);
+      await sleep(450);
     } else {
       warn("no add-row button found (will try to fill latest row anyway)");
     }
   }
 
+  function clickEl(el) {
+    try {
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    } catch (e) {
+      try { el.click(); } catch {}
+    }
+  }
+
   function findAddByText() {
-    return Array.from(document.querySelectorAll("button, a, [role=button], span, div, i"))
-      .filter(isVisible)
-      .find((b) => /\+\s*新增|新增明细|新增费用|添加明细|添加费用|^\+\s*$/i.test((b.textContent || "").trim()));
+    const all = Array.from(document.querySelectorAll("button, a, [role=button]")).filter(isVisible);
+    // Prefer exact matches first (the toolbar primary button)
+    const exact = all.find((b) =>
+      /^(\+\s*)?(新增费用|新增明细|添加费用|添加明细|新增)$/i.test((b.textContent || "").trim()),
+    );
+    if (exact) return exact;
+    // Then partial matches
+    return all.find((b) => /(新增费用|新增明细|添加费用|添加明细)/i.test((b.textContent || "").trim()));
   }
 
   // Convert a description back to a live element (best effort by id+rect)
@@ -251,6 +271,24 @@
 
   async function fillOneRecord(rec) {
     let touched = 0;
+
+    // Strategy 0: table column-index. Most expense forms render as a table
+    // with column headers (日期 / 费用类型 / 金额 / 备注 / ...). We map
+    // column indices via the header row, then fill cells in the latest row.
+    const tableTargets = findTableTargets();
+    if (tableTargets) {
+      log("table targets:", Object.fromEntries(
+        Object.entries(tableTargets.targets).map(([k, v]) => [k, v ? describeEl(v) : null])
+      ));
+      const t = tableTargets.targets;
+      if (t.type && (await setComboboxValue(t.type, TYPE_TEXTS[rec.type] || TYPE_TEXTS.other))) touched++;
+      await sleep(120);
+      if (t.date && setInputValue(t.date, formatDateForInput(t.date, rec.date))) touched++;
+      if (t.currency && (await setComboboxValue(t.currency, [rec.currency]))) touched++;
+      if (t.amount && setInputValue(t.amount, String(rec.amount ?? 0))) touched++;
+      if (t.note && setInputValue(t.note, rec.note || "")) touched++;
+      if (touched > 0) return true;
+    }
 
     // Strategy 1: label-anchored
     const targets = {
@@ -292,6 +330,101 @@
     }
 
     return touched > 0;
+  }
+
+  /* ---------- Table column-index strategy ---------- */
+
+  function findExpenseTable() {
+    const tables = Array.from(document.querySelectorAll('table, [role="table"]')).filter(isVisible);
+    for (const table of tables) {
+      const headers = collectHeaderTexts(table);
+      // Must contain at least 2 of our target labels to qualify
+      let hits = 0;
+      for (const key of Object.keys(LABELS)) {
+        if (headers.some((h) => LABELS[key].some((l) => h.text.includes(l)))) hits++;
+      }
+      if (hits >= 2) return { table, headers };
+    }
+    return null;
+  }
+
+  function collectHeaderTexts(table) {
+    const ths = Array.from(table.querySelectorAll('th, [role="columnheader"]'))
+      .filter(isVisible);
+    if (ths.length) {
+      return ths.map((el, idx) => ({
+        idx,
+        text: (el.textContent || "").trim(),
+        rect: el.getBoundingClientRect(),
+        el,
+      }));
+    }
+    // Fallback: try first row's cells if no <th>
+    const firstRow = table.querySelector("tr, [role='row']");
+    if (!firstRow) return [];
+    const tds = Array.from(firstRow.querySelectorAll("td, [role='cell']"));
+    return tds.map((el, idx) => ({
+      idx,
+      text: (el.textContent || "").trim(),
+      rect: el.getBoundingClientRect(),
+      el,
+    }));
+  }
+
+  function findTableTargets() {
+    const info = findExpenseTable();
+    if (!info) return null;
+    const { table, headers } = info;
+
+    // Map field key → column index by matching label text
+    const colMap = {};
+    for (const key of Object.keys(LABELS)) {
+      const h = headers.find((h) => LABELS[key].some((l) => h.text.includes(l)));
+      if (h) colMap[key] = h.idx;
+    }
+    log("table column map:", colMap);
+    if (!Object.keys(colMap).length) return null;
+
+    // Prefer the row that has at least one input/textarea; otherwise the last row.
+    const rows = Array.from(table.querySelectorAll("tr, [role='row']")).filter(isVisible);
+    let target = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"], [role="combobox"]')) {
+        target = r;
+        break;
+      }
+    }
+    // If no editable row exists, the click-add path needs to run first.
+    if (!target) return { table, targets: {}, colMap, rowMissing: true };
+
+    const cells = Array.from(target.querySelectorAll("td, [role='cell']"));
+    const targets = {};
+    for (const [field, idx] of Object.entries(colMap)) {
+      const cell = cells[idx];
+      if (!cell) continue;
+      const inp =
+        cell.querySelector('input:not([type="hidden"]):not([disabled])') ||
+        cell.querySelector("textarea:not([disabled])") ||
+        cell.querySelector("select:not([disabled])") ||
+        cell.querySelector('[role="combobox"]') ||
+        cell.querySelector('[contenteditable="true"]');
+      if (inp) targets[field] = inp;
+    }
+    return { table, targets, colMap, row: target };
+  }
+
+  function findEmptyRowInTable(info) {
+    if (!info) return null;
+    const rows = Array.from(info.table.querySelectorAll("tr, [role='row']")).filter(isVisible);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      const inputs = r.querySelectorAll('input:not([type="hidden"]):not([disabled]), textarea:not([disabled])');
+      if (inputs.length === 0) continue;
+      const allEmpty = Array.from(inputs).every((el) => !el.value);
+      if (allEmpty) return r;
+    }
+    return null;
   }
 
   function findInputByLabel(labelTexts) {

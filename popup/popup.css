@@ -134,9 +134,15 @@ body {
 .segmented {
   flex: 0 0 auto;
   display: flex;
+  align-items: center;
   gap: 4px;
   padding: 8px 14px;
   background: var(--bg);
+  border-bottom: 0.5px solid var(--separator);
+}
+
+.segmented .icon-btn {
+  margin-left: 4px;
 }
 
 .seg-btn {
