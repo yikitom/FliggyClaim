@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>FliggyClaim 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <h1>FliggyClaim 设置</h1>
+        <p class="sub">可选：配置 OCR / 大模型接口，用于更精准地识别票据。</p>
+      </header>
+
+      <section class="card">
+        <div class="row">
+          <label class="label">
+            <span>启用远程识别</span>
+            <input type="checkbox" id="ocrEnabled" />
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="label-block">
+            <span>识别接口 Endpoint</span>
+            <input
+              type="url"
+              id="ocrEndpoint"
+              placeholder="https://your-ocr-service.example.com/parse"
+            />
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="label-block">
+            <span>API Key（可选）</span>
+            <input type="password" id="ocrKey" placeholder="sk-..." />
+          </label>
+        </div>
+
+        <div class="row">
+          <button class="btn primary" id="saveBtn">保存</button>
+          <span class="hint" id="hint"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>接口约定</h2>
+        <p class="muted">
+          POST JSON 到 Endpoint，body 字段：<br />
+          <code>{ filename, mime, data (base64), draft }</code><br />
+          返回 JSON：<code>{ type, date, currency, amount, note }</code>。
+        </p>
+      </section>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

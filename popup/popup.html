@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FliggyClaim</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="title-bar">
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <span class="brand-name">FliggyClaim</span>
+      </div>
+      <button class="icon-btn" id="settingsBtn" title="设置" aria-label="设置">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9.43 3.5c0 .47-.04.93-.1 1.39l2.05 1.6a.5.5 0 0 1 .12.62l-1.94 3.36a.5.5 0 0 1-.6.22l-2.4-.96a7.5 7.5 0 0 1-2.4 1.39l-.36 2.55a.5.5 0 0 1-.5.43h-3.88a.5.5 0 0 1-.5-.43l-.36-2.55a7.5 7.5 0 0 1-2.4-1.39l-2.4.96a.5.5 0 0 1-.6-.22L1.6 15.61a.5.5 0 0 1 .12-.62l2.05-1.6c-.06-.46-.1-.92-.1-1.39 0-.47.04-.93.1-1.39L1.72 9.01a.5.5 0 0 1-.12-.62l1.94-3.36a.5.5 0 0 1 .6-.22l2.4.96a7.5 7.5 0 0 1 2.4-1.39l.36-2.55a.5.5 0 0 1 .5-.43h3.88a.5.5 0 0 1 .5.43l.36 2.55a7.5 7.5 0 0 1 2.4 1.39l2.4-.96a.5.5 0 0 1 .6.22l1.94 3.36a.5.5 0 0 1-.12.62l-2.05 1.6c.06.46.1.92.1 1.39Z"
+          />
+        </svg>
+      </button>
+    </header>
+
+    <nav class="segmented" role="tablist">
+      <button class="seg-btn is-active" role="tab" data-tab="upload" id="tabUpload">
+        上传凭证
+      </button>
+      <button class="seg-btn" role="tab" data-tab="parsed" id="tabParsed">
+        费用明细
+        <span class="badge" id="parsedBadge" hidden>0</span>
+      </button>
+    </nav>
+
+    <main class="content">
+      <!-- Upload tab -->
+      <section class="panel is-active" id="panelUpload" role="tabpanel">
+        <div class="upload-wrap">
+          <div class="dropzone" id="dropzone" tabindex="0">
+            <input
+              type="file"
+              id="fileInput"
+              multiple
+              accept="application/pdf,image/png,image/jpeg,image/jpg,image/webp,image/heic,image/heif,image/bmp,image/gif,image/tiff"
+              hidden
+            />
+            <div class="dropzone-inner">
+              <div class="dropzone-icon">
+                <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M24 32V10m0 0-8 8m8-8 8 8M8 30v6a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-6"
+                  />
+                </svg>
+              </div>
+              <p class="dropzone-title">拖拽文件到这里上传</p>
+              <p class="dropzone-sub">支持 PDF、PNG、JPG、WEBP、HEIC 等</p>
+              <button class="btn ghost" id="browseBtn" type="button">选择文件</button>
+            </div>
+          </div>
+
+          <aside class="summary" aria-label="文件汇总">
+            <div class="summary-head">
+              <h3>已添加</h3>
+              <button class="link-btn" id="clearAllBtn" type="button" hidden>清空</button>
+            </div>
+            <ul class="file-list" id="fileList"></ul>
+            <div class="summary-stats">
+              <div class="stat">
+                <span class="stat-num" id="statCount">0</span>
+                <span class="stat-label">个文件</span>
+              </div>
+              <div class="stat">
+                <span class="stat-num" id="statSize">0 KB</span>
+                <span class="stat-label">总大小</span>
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <div class="footer">
+          <div class="progress" id="parseProgress" hidden>
+            <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+            <span class="progress-label" id="progressLabel">0 / 0</span>
+          </div>
+          <button class="btn primary" id="confirmParseBtn" disabled>确定解析</button>
+        </div>
+      </section>
+
+      <!-- Parsed tab -->
+      <section class="panel" id="panelParsed" role="tabpanel">
+        <div class="parsed-list-wrap">
+          <div class="empty" id="parsedEmpty">
+            <div class="empty-icon">
+              <svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M10 8h20l8 8v24a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2Z M30 8v8h8"
+                />
+              </svg>
+            </div>
+            <p class="empty-title">还没有解析结果</p>
+            <p class="empty-sub">先在「上传凭证」里添加文件并解析</p>
+          </div>
+          <ul class="parsed-list" id="parsedList"></ul>
+        </div>
+
+        <div class="footer">
+          <div class="totals" id="totals" hidden>
+            <span><b id="totalCount">0</b> 条记录</span>
+            <span class="dot">·</span>
+            <span>合计 <b id="totalAmount">0.00</b> <span id="totalCurrency">CNY</span></span>
+          </div>
+          <button class="btn primary" id="importBtn" disabled>确定导入到报销系统</button>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <template id="fileItemTpl">
+      <li class="file-item">
+        <span class="file-icon"></span>
+        <div class="file-meta">
+          <span class="file-name"></span>
+          <span class="file-size"></span>
+        </div>
+        <button class="icon-btn small remove" aria-label="移除" title="移除">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              d="M6 6l12 12M18 6L6 18"
+            />
+          </svg>
+        </button>
+      </li>
+    </template>
+
+    <template id="parsedItemTpl">
+      <li class="parsed-item">
+        <div class="parsed-row">
+          <select class="field type">
+            <option value="flight">机票</option>
+            <option value="hotel">酒店</option>
+            <option value="meal">餐饮</option>
+            <option value="taxi">打车</option>
+            <option value="other">其他</option>
+          </select>
+          <input class="field date" type="date" />
+          <select class="field currency">
+            <option>CNY</option>
+            <option>USD</option>
+            <option>EUR</option>
+            <option>JPY</option>
+            <option>HKD</option>
+            <option>GBP</option>
+            <option>SGD</option>
+          </select>
+          <input class="field amount" type="number" step="0.01" min="0" />
+        </div>
+        <div class="parsed-row second">
+          <input class="field note" maxlength="20" placeholder="备注 (≤20字)" />
+          <span class="src-name" title=""></span>
+          <button class="icon-btn small remove-parsed" aria-label="删除" title="删除">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                d="M6 6l12 12M18 6L6 18"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+    </template>
+
+    <script src="../lib/parser.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>
