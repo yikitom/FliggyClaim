@@ -22,12 +22,15 @@ rm -f "$OUT"
 # Files to include
 zip -r "$OUT" \
   manifest.json \
+  INSTALL.txt \
   background \
   content \
   icons \
   lib \
   options \
   popup \
+  scripts/install.sh \
+  scripts/install.ps1 \
   -x "*.DS_Store" \
   -x "*/.DS_Store" \
   -x "*/.*" \
