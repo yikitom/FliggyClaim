@@ -27,11 +27,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         });
         console.log("[FliggyClaim bg] re-injected into tab", tab.id);
       } catch (e) {
-        console.warn("[FliggyClaim bg] inject failed for tab", tab.id, e?.message);
+        console.log("[FliggyClaim bg] inject skipped for tab", tab.id, e?.message);
       }
     }
   } catch (e) {
-    console.warn("[FliggyClaim bg] tabs.query failed:", e);
+    console.log("[FliggyClaim bg] tabs.query skipped:", e?.message || e);
   }
 });
 
@@ -39,7 +39,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
   chrome.sidePanel
     .setPanelBehavior({ openPanelOnActionClick: true })
-    .catch((err) => console.warn("[FliggyClaim] sidePanel behavior:", err));
+    .catch((err) => console.log("[FliggyClaim] sidePanel behavior skipped:", err?.message || err));
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
