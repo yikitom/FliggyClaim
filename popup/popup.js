@@ -344,67 +344,104 @@ function updateTotals() {
 }
 
 /* ---------- Import to system ---------- */
+async function getTargetTab() {
+  // The side panel itself is not a normal tab; "active in current window"
+  // returns the page the user is looking at.
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !/alibaba-inc\.com\/expense\//.test(tab.url || "")) {
+    throw new Error("请在报销系统页面打开此插件");
+  }
+  return tab;
+}
+
+async function ping(tabId) {
+  try {
+    const r = await chrome.tabs.sendMessage(tabId, { type: "FLIGGY_PING" });
+    return !!(r && r.ok);
+  } catch {
+    return false;
+  }
+}
+
+async function ensureContentScript(tabId) {
+  if (await ping(tabId)) {
+    console.log("[FliggyClaim] content script already alive in tab", tabId);
+    return;
+  }
+  console.log("[FliggyClaim] injecting content script into tab", tabId);
+  try {
+    await chrome.scripting.insertCSS({
+      target: { tabId, allFrames: false },
+      files: ["content/content.css"],
+    });
+  } catch (e) {
+    console.warn("[FliggyClaim] insertCSS failed:", e);
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: false },
+    files: ["content/content.js"],
+  });
+  // tiny grace period for the script to register its onMessage listener
+  await new Promise((r) => setTimeout(r, 80));
+  if (!(await ping(tabId))) {
+    throw new Error("内容脚本注入后仍无响应（请尝试手动刷新报销页）");
+  }
+}
+
+async function withTab(fn, btnSel) {
+  const btn = btnSel ? $(btnSel) : null;
+  if (btn) btn.disabled = true;
+  try {
+    const tab = await getTargetTab();
+    await ensureContentScript(tab.id);
+    return await fn(tab);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function importToSystem() {
   if (state.records.length === 0) return;
-  $("#importBtn").disabled = true;
-
   try {
-    const [tab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-    if (!tab || !/alibaba-inc\.com\/expense\//.test(tab.url || "")) {
-      toast("请在报销系统页面打开此插件", "error");
-      $("#importBtn").disabled = false;
-      return;
-    }
-
-    console.log("[FliggyClaim] sending FLIGGY_FILL to tab", tab.id, tab.url);
-    const resp = await chrome.tabs.sendMessage(tab.id, {
-      type: "FLIGGY_FILL",
-      records: state.records,
-    });
-    console.log("[FliggyClaim] FLIGGY_FILL response:", resp);
-
-    if (resp && resp.ok) {
-      toast(`已写入 ${resp.filled} 条到报销系统`);
-    } else {
-      toast(resp?.error || "写入失败，请打开 DevTools 查看日志", "error");
-    }
+    await withTab(async (tab) => {
+      console.log("[FliggyClaim] sending FLIGGY_FILL to tab", tab.id, tab.url);
+      const resp = await chrome.tabs.sendMessage(tab.id, {
+        type: "FLIGGY_FILL",
+        records: state.records,
+      });
+      console.log("[FliggyClaim] FLIGGY_FILL response:", resp);
+      if (resp && resp.ok) {
+        toast(`已写入 ${resp.filled} / ${state.records.length} 条到报销系统`);
+      } else {
+        toast(resp?.error || "写入失败，请打开 DevTools 查看日志", "error");
+      }
+    }, "#importBtn");
   } catch (err) {
     console.error("[FliggyClaim] import error:", err);
-    toast("注入失败：" + (err?.message || "请刷新报销页面后重试"), "error");
-  } finally {
-    $("#importBtn").disabled = state.records.length === 0;
+    toast(err?.message || "注入失败", "error");
   }
 }
 
 async function runDiagnostics() {
   try {
-    const [tab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-    if (!tab || !/alibaba-inc\.com\/expense\//.test(tab.url || "")) {
-      toast("请在报销系统页面打开此插件", "error");
-      return;
-    }
-    const resp = await chrome.tabs.sendMessage(tab.id, { type: "FLIGGY_DIAG" });
-    console.log("[FliggyClaim] diagnostic response:", resp);
-    if (resp && resp.ok) {
-      const text = JSON.stringify(resp.report, null, 2);
-      try {
-        await navigator.clipboard.writeText(text);
-        toast("诊断报告已复制到剪贴板，把它发给我即可");
-      } catch {
-        toast("诊断完成，请打开 DevTools 控制台查看报告");
+    await withTab(async (tab) => {
+      const resp = await chrome.tabs.sendMessage(tab.id, { type: "FLIGGY_DIAG" });
+      console.log("[FliggyClaim] diagnostic response:", resp);
+      if (resp && resp.ok) {
+        const text = JSON.stringify(resp.report, null, 2);
+        try {
+          await navigator.clipboard.writeText(text);
+          toast("诊断报告已复制到剪贴板，把它发给开发者即可");
+        } catch {
+          toast("诊断完成，请打开 DevTools 控制台查看报告");
+        }
+      } else {
+        toast(resp?.error || "诊断失败", "error");
       }
-    } else {
-      toast(resp?.error || "诊断失败：内容脚本未响应（请刷新页面）", "error");
-    }
+    }, "#diagBtn");
   } catch (err) {
     console.error("[FliggyClaim] diag error:", err);
-    toast("诊断失败：" + (err?.message || "请刷新报销页面"), "error");
+    toast(err?.message || "诊断失败", "error");
   }
 }
 
