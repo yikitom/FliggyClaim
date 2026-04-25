@@ -71,7 +71,7 @@
       return false;
     }
     if (msg.type === "FLIGGY_FILL") {
-      fillRecords(msg.records || [])
+      fillRecords(msg.records || [], msg.attachments || {})
         .then((res) => sendResponse({ ok: true, ...res }))
         .catch((err) => {
           warn("fill error:", err);
@@ -83,31 +83,35 @@
 
   /* ---------- Public flow ---------- */
 
-  async function fillRecords(records) {
-    log(`starting fill: ${records.length} records`);
+  async function fillRecords(records, attachments) {
+    log(`starting fill: ${records.length} records`,
+      `attachments: ${Object.keys(attachments || {}).length}`);
     let filled = 0;
+    let attached = 0;
     showOverlay(`准备写入 ${records.length} 条…`);
     for (let i = 0; i < records.length; i++) {
       const rec = records[i];
+      const att = attachments && attachments[rec.source];
       showOverlay(`写入第 ${i + 1} / ${records.length} 条 (${rec.type})…`);
       try {
-        await fillSingleExpense(rec);
+        const result = await fillSingleExpense(rec, att);
         filled++;
-        log(`✓ filled record ${i + 1}/${records.length}`, rec);
+        if (result && result.attached) attached++;
+        log(`✓ filled record ${i + 1}/${records.length}`, rec, result);
       } catch (e) {
         warn(`× record ${i + 1}/${records.length} failed:`, rec, e);
         await tryCancelDrawer();
       }
       await sleep(700);
     }
-    hideOverlay(`已写入 ${filled} / ${records.length} 条`);
+    hideOverlay(`已写入 ${filled} / ${records.length} 条 (附件 ${attached})`);
     if (filled === 0) {
       throw new Error("0 条写入成功——请打开 DevTools 控制台查看 [FliggyClaim] 日志");
     }
-    return { filled };
+    return { filled, attached };
   }
 
-  async function fillSingleExpense(rec) {
+  async function fillSingleExpense(rec, attachment) {
     // 1. Click "新增费用"
     const addBtn = findAddExpenseButton();
     if (!addBtn) throw new Error("没找到「新增费用」按钮");
@@ -131,6 +135,12 @@
     // 5. Fill fields based on visible labels in the form
     await fillFormFields(form, rec, formTitle);
 
+    // 5b. Attach the source receipt file (if popup provided one)
+    let attached = false;
+    if (attachment && attachment.data) {
+      attached = await attachReceiptFile(form, attachment, rec.source);
+    }
+
     // 6. Click 保存 inside the form
     const saveBtn = findSaveButton(form);
     if (!saveBtn) throw new Error("没找到表单内的「保存」按钮");
@@ -139,6 +149,49 @@
 
     // 7. Wait for drawer to close (form vanishes)
     await waitFor(() => !findCategoryForm(), 6000, "drawer close");
+    return { attached };
+  }
+
+  /* ---------- File attachment ---------- */
+
+  async function attachReceiptFile(form, att, filename) {
+    try {
+      const input = findFileInput(form);
+      if (!input) {
+        log("no file input found in form, skipping attachment for", filename);
+        return false;
+      }
+      const dataUrl = `data:${att.mime || "application/octet-stream"};base64,${att.data}`;
+      const blob = await fetch(dataUrl).then((r) => r.blob());
+      const file = new File([blob], filename, { type: att.mime || blob.type });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      try {
+        input.files = dt.files;
+      } catch {
+        // Fallback for non-standard file inputs.
+        Object.defineProperty(input, "files", { value: dt.files, configurable: true });
+      }
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      log(`→ attached ${filename} (${file.size} B) to`, input);
+      // Wait briefly for the upload component to register and show progress.
+      await sleep(1500);
+      return true;
+    } catch (e) {
+      warn("attach failed:", filename, e);
+      return false;
+    }
+  }
+
+  function findFileInput(scope) {
+    // Look for any enabled file input within this drawer/form scope.
+    const inputs = Array.from((scope || document).querySelectorAll('input[type="file"]'));
+    return (
+      inputs.find((i) => !i.disabled && !i.readOnly) ||
+      inputs[0] ||
+      null
+    );
   }
 
   /* ---------- Discovery helpers ---------- */
