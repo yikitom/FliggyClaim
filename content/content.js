@@ -149,9 +149,15 @@
     log("→ clicking category leaf", leaf);
     clickEl(leaf);
 
-    // 4. Wait for category form
-    const form = await waitFor(() => findCategoryForm(), 5000, "category form");
-    const formTitle = (form.querySelector("h1, h2, h3, h4")?.textContent || "").trim();
+    // 4. Wait for category form. 10s — TAE drawers occasionally take 2–3s on
+    // first open while the schema loads.
+    const form = await waitFor(() => findCategoryForm(), 10000, "category form");
+    // Title sniff: prefer text that starts with "差旅-" inside the form scope,
+    // else fall back to any heading.
+    const titleEl = Array.from(form.querySelectorAll("h1, h2, h3, h4, div, span"))
+      .filter(isVisible)
+      .find((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12);
+    const formTitle = (titleEl?.textContent || form.querySelector("h1, h2, h3, h4")?.textContent || "").trim();
     log("→ category form opened, title:", formTitle, form);
 
     // 5. Fill fields based on visible labels in the form
@@ -357,26 +363,31 @@
   }
 
   function findCategoryForm() {
-    // Form has a header like "差旅-餐费" / "差旅-住宿" etc., and 保存 button.
-    // The expense table on the left ALSO renders these strings as cell values;
-    // prefer drawer titles, fall back to all matches if none are found outside
-    // table chrome (Fusion variants put role="row" on form items).
-    const allTitles = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span"))
+    // Anchor on the 「保存」 button: the category FORM drawer has one, the
+    // category PICKER drawer does NOT. Walking up from the save button is
+    // far more reliable than walking up from a "差旅-XXX" title text — TAE
+    // nests its form bodies 7–9 levels deep, deeper than is safe to walk
+    // from a title (you'd cross into the page wrapper).
+    // The button's textContent may be "保存", "保存 ▾", "保存▾", or 保存草稿;
+    // accept any starts-with-保存 that isn't 保存草稿.
+    const saves = Array.from(document.querySelectorAll("button"))
       .filter(isVisible)
-      .filter((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12);
-    const nonTableTitles = allTitles.filter((el) => !isInTableScope(el));
-    const titles = nonTableTitles.length > 0 ? nonTableTitles : allTitles;
-    for (const t of titles) {
-      let cur = t;
-      // Walk up only a handful of levels — the drawer body is typically 2–4
-      // ancestors above the title; going to 10 risks crossing into a shared
-      // page wrapper that also contains unrelated forms.
-      for (let i = 0; i < 6 && cur; i++) {
-        if (cur.querySelector && cur.querySelector("input, textarea, select")) {
-          const save = Array.from(cur.querySelectorAll("button"))
-            .filter(isVisible)
-            .find((b) => /^保存/.test((b.textContent || "").trim()));
-          if (save) return cur;
+      .filter((b) => {
+        const t = (b.textContent || "").trim();
+        return t.startsWith("保存") && !t.startsWith("保存草稿");
+      });
+    for (const save of saves) {
+      let cur = save.parentElement;
+      // Walk up until we find an ancestor that holds form fields AND looks
+      // like a category form (Chinese form labels we recognize).
+      for (let i = 0; i < 14 && cur; i++) {
+        if (cur.querySelector && cur.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]')) {
+          // Sanity: container should include category-form-ish text — guards
+          // against returning a page-wide wrapper if other 保存 buttons exist.
+          const txt = cur.textContent || "";
+          if (/差旅-|有收据|无收据|费用发生|金额|币种|入住时间|乘机日期/.test(txt)) {
+            return cur;
+          }
         }
         cur = cur.parentElement;
       }
