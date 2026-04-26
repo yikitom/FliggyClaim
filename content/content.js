@@ -64,7 +64,7 @@
     }
     if (msg.type === "FLIGGY_DIAG") {
       try {
-        sendResponse({ ok: true, report: diagnose() });
+        sendResponse({ ok: true, report: diagnose(msg.records || null) });
       } catch (err) {
         sendResponse({ ok: false, error: err?.message || String(err) });
       }
@@ -88,22 +88,39 @@
       `attachments: ${Object.keys(attachments || {}).length}`);
     let filled = 0;
     let attached = 0;
+    const perRecord = [];
     showOverlay(`准备写入 ${records.length} 条…`);
     for (let i = 0; i < records.length; i++) {
       const rec = records[i];
       const att = attachments && attachments[rec.source];
       showOverlay(`写入第 ${i + 1} / ${records.length} 条 (${rec.type})…`);
+      const slot = {
+        index: i + 1,
+        type: rec.type, currency: rec.currency, amount: rec.amount,
+        ok: false, error: null, amountFinal: null,
+      };
       try {
         const result = await fillSingleExpense(rec, att);
         filled++;
         if (result && result.attached) attached++;
+        slot.ok = true;
+        slot.amountFinal = result?.amountFinal ?? null;
         log(`✓ filled record ${i + 1}/${records.length}`, rec, result);
       } catch (e) {
         warn(`× record ${i + 1}/${records.length} failed:`, rec, e);
+        slot.error = e?.message || String(e);
         await tryCancelDrawer();
       }
+      perRecord.push(slot);
       await sleep(700);
     }
+    lastFillSummary = {
+      at: new Date().toISOString(),
+      total: records.length,
+      filled,
+      attached,
+      perRecord,
+    };
     hideOverlay(`已写入 ${filled} / ${records.length} 条 (附件 ${attached})`);
     if (filled === 0) {
       throw new Error("0 条写入成功——请打开 DevTools 控制台查看 [FliggyClaim] 日志");
@@ -133,7 +150,7 @@
     log("→ category form opened, title:", formTitle, form);
 
     // 5. Fill fields based on visible labels in the form
-    await fillFormFields(form, rec, formTitle);
+    const fillOutcome = await fillFormFields(form, rec, formTitle);
 
     // 5b. Attach the source receipt file (if popup provided one)
     let attached = false;
@@ -149,7 +166,7 @@
 
     // 7. Wait for drawer to close (form vanishes)
     await waitFor(() => !findCategoryForm(), 6000, "drawer close");
-    return { attached };
+    return { attached, amountFinal: fillOutcome?.amountFinal ?? null, amountInput: fillOutcome?.amountInput ?? null };
   }
 
   /* ---------- File attachment ---------- */
@@ -331,6 +348,7 @@
   async function fillFormFields(form, rec, formTitle) {
     const isHotel = /住宿|酒店/.test(formTitle);
     const isTaxi = /打车|出租/.test(formTitle);
+    const outcome = { amountFinal: null, amountInput: null };
 
     // Common fields
     if (isHotel) {
@@ -390,6 +408,8 @@
         document.body.click();
       }
       log("amount final value:", fresh.value);
+      outcome.amountFinal = fresh.value;
+      outcome.amountInput = describeInput(fresh);
       await waitForRatePopulated(form, 2500);
     } else {
       warn("amount label not found in form");
@@ -398,6 +418,7 @@
     // Note / 详细说明
     const note = findInputByLabel(form, LABELS.note);
     if (note) setInputValue(note, rec.note || "");
+    return outcome;
   }
 
   // Poll the form for a non-zero exchange rate or converted amount.
@@ -633,14 +654,56 @@
 
   /* ---------- Diagnostics ---------- */
 
-  function diagnose() {
+  // Captured by fillRecords; surfaced via diagnose() so the user can see
+  // exactly what the last import attempt did.
+  let lastFillSummary = null;
+
+  function describeInput(el) {
+    if (!el) return null;
+    return {
+      tag: el.tagName.toLowerCase(),
+      type: el.type || null,
+      cls: (el.className || "").toString().slice(0, 120),
+      value: ((el.value ?? el.textContent ?? "") + "").slice(0, 60),
+      placeholder: el.placeholder || null,
+      readonly: !!el.readOnly,
+      disabled: !!el.disabled,
+      role: el.getAttribute && el.getAttribute("role"),
+    };
+  }
+
+  function probeLabels(form) {
+    if (!form) return null;
+    const out = {};
+    for (const key of ["amount", "currency", "date", "city", "note", "checkin", "checkout"]) {
+      const labels = LABELS[key];
+      if (!labels) continue;
+      out[key] = describeInput(findInputByLabel(form, labels));
+    }
+    return out;
+  }
+
+  function diagnose(records) {
+    const form = findCategoryForm();
     return {
       url: location.href,
       title: document.title,
       isTop: window.top === window,
       addButton: describeMaybe(findAddExpenseButton()),
       categoryPicker: !!findCategoryPicker(),
-      categoryForm: describeMaybe(findCategoryForm()),
+      categoryForm: describeMaybe(form),
+      // Per-label input probe — confirms which actual <input> each label
+      // resolves to in the currently-open drawer (open one manually before
+      // running 诊断 to populate this).
+      formProbes: probeLabels(form),
+      // Records the popup is about to send (or just sent). Confirms the
+      // chrome message payload carries amount/currency/etc end-to-end.
+      pendingRecords: Array.isArray(records) ? records.map((r) => ({
+        type: r.type, date: r.date, currency: r.currency,
+        amount: r.amount, note: (r.note || "").slice(0, 40),
+        source: r.source,
+      })) : null,
+      lastFillSummary,
       currentVisibleLabels: collectVisibleLabels(),
     };
   }

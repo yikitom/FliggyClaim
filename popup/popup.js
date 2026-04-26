@@ -491,7 +491,10 @@ function guessMime(name) {
 async function runDiagnostics() {
   try {
     await withTab(async (tab) => {
-      const resp = await chrome.tabs.sendMessage(tab.id, { type: "FLIGGY_DIAG" });
+      const resp = await chrome.tabs.sendMessage(tab.id, {
+        type: "FLIGGY_DIAG",
+        records: state.records,
+      });
       console.log("[FliggyClaim] diagnostic response:", resp);
       if (resp && resp.ok) {
         const text = JSON.stringify(resp.report, null, 2);
