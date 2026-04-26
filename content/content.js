@@ -225,15 +225,63 @@
 
   // Same anchor strategy as findInputByLabel, but specifically for file inputs
   // (which findInputByLabel/pickFillable deliberately exclude).
+  // Heuristic fallback when findInputByLabel returns nothing for "金额".
+  // Strategy: find any element whose text is exactly "金额" (no parent walk
+  // restrictions, no table-scope filter) and pick the input visually closest
+  // to it on the right or below — the field that LOOKS like the amount cell.
+  function findAmountInputByHeuristic(scope) {
+    const root = scope || document;
+    const labelEls = Array.from(root.querySelectorAll("label, span, div, dt, p, th, em, b, strong"))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
+        return t === "金额" || t === "金额：" || t === "金额:";
+      });
+    if (!labelEls.length) return null;
+    const inputs = Array.from(root.querySelectorAll('input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([disabled]):not([readonly])'))
+      .filter(isVisible)
+      // Skip inputs inside the read-only expense table on the left.
+      .filter((el) => !isInTableScope(el))
+      // Prefer numeric / placeholder-empty inputs that look like amount fields.
+      ;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const lbl of labelEls) {
+      const lr = lbl.getBoundingClientRect();
+      for (const inp of inputs) {
+        const ir = inp.getBoundingClientRect();
+        // Same row (vertical overlap) AND input is to the right of the label,
+        // OR input is directly below the label.
+        const verticalOverlap = Math.min(lr.bottom, ir.bottom) - Math.max(lr.top, ir.top);
+        const horizontalOverlap = Math.min(lr.right, ir.right) - Math.max(lr.left, ir.left);
+        const sameRow = verticalOverlap > 5 && ir.left >= lr.right - 4;
+        const directlyBelow = ir.top >= lr.bottom - 4 && ir.top - lr.bottom < 30 && horizontalOverlap > 20;
+        if (!sameRow && !directlyBelow) continue;
+        // Closer = better. Penalize distance.
+        const dist = sameRow
+          ? (ir.left - lr.right)
+          : (ir.top - lr.bottom + Math.abs((ir.left + ir.right) / 2 - (lr.left + lr.right) / 2));
+        // Bonus for placeholder mentioning 输入 / amount-y attributes.
+        let score = -dist;
+        if (/请输入|amount|\.|0/.test(inp.placeholder || "")) score += 50;
+        if (inp.type === "number") score += 100;
+        if (inp.getAttribute("aria-label") && /金额/.test(inp.getAttribute("aria-label"))) score += 200;
+        if (score > bestScore) { bestScore = score; best = inp; }
+      }
+    }
+    return best;
+  }
+
   function findFileInputByLabel(scope, labels) {
     if (!scope) return null;
-    const labelEls = Array.from(scope.querySelectorAll("label, span, div, dt, p, th"))
+    const allMatching = Array.from(scope.querySelectorAll("label, span, div, dt, p, th"))
       .filter(isVisible)
       .filter((el) => {
         const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
         return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      })
-      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
+      });
+    const nonTable = allMatching.filter((el) => !isInTableScope(el));
+    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
     const pickFile = (el) => el && el.querySelector
       ? el.querySelector('input[type="file"]:not([disabled])') : null;
     for (const lbl of labelEls) {
@@ -310,14 +358,14 @@
 
   function findCategoryForm() {
     // Form has a header like "差旅-餐费" / "差旅-住宿" etc., and 保存 button.
-    // The expense table on the left ALSO renders these strings as cell values,
-    // so we skip any title inside table chrome — otherwise the walk-up from
-    // a table cell ends at the page-level container (which then makes label
-    // lookups inside the "form" stray into the wrong drawer fields).
-    const titles = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span"))
+    // The expense table on the left ALSO renders these strings as cell values;
+    // prefer drawer titles, fall back to all matches if none are found outside
+    // table chrome (Fusion variants put role="row" on form items).
+    const allTitles = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span"))
       .filter(isVisible)
-      .filter((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12)
-      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
+      .filter((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12);
+    const nonTableTitles = allTitles.filter((el) => !isInTableScope(el));
+    const titles = nonTableTitles.length > 0 ? nonTableTitles : allTitles;
     for (const t of titles) {
       let cur = t;
       // Walk up only a handful of levels — the drawer body is typically 2–4
@@ -440,6 +488,11 @@
     // we cached a stale node reference).
     const wantAmt = String(rec.amount ?? 0);
     let amt = findInputByLabel(form, LABELS.amount);
+    // Last-ditch fallback: if label-anchored lookup returns nothing, find the
+    // input that LOOKS like an amount field — required + numeric placeholder
+    // ("请输入") + sits next to a label whose text contains "金额".
+    if (!amt) amt = findAmountInputByHeuristic(form);
+    log("→ amount input:", amt ? describeInput(amt) : "NOT FOUND");
     if (amt) {
       await setInputValue(amt, wantAmt);
       await sleep(180);
@@ -450,7 +503,7 @@
       document.body.click();
       // Verify and retry once with a fresh node lookup if the value vanished.
       await sleep(120);
-      let fresh = findInputByLabel(form, LABELS.amount) || amt;
+      let fresh = findInputByLabel(form, LABELS.amount) || findAmountInputByHeuristic(form) || amt;
       if (parseFloat((fresh.value || "0").toString().replace(/,/g, "")) !== parseFloat(wantAmt)) {
         log("amount didn't stick on first pass; retrying. got:", fresh.value, "want:", wantAmt);
         await setInputValue(fresh, wantAmt);
@@ -466,7 +519,7 @@
       outcome.amountInput = describeInput(fresh);
       await waitForRatePopulated(form, 2500);
     } else {
-      warn("amount label not found in form");
+      warn("amount label not found in form — neither findInputByLabel nor heuristic found a candidate. Run 诊断 to see amountDeepProbe.");
     }
 
     // Note / 详细说明
@@ -536,21 +589,29 @@
 
   /* ---------- Label-anchored input finder ---------- */
 
+  // Returns true if the element lives inside actual table chrome OR an ARIA
+  // grid widget. Excluded ARIA roles are intentionally narrow — `row`/`cell`
+  // would also match Fusion form items in some builds, which we DO want.
+  const TABLE_SCOPE_SEL = "th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='gridcell'], [role='grid']";
+  function isInTableScope(el) {
+    return !!(el && el.closest && el.closest(TABLE_SCOPE_SEL));
+  }
+
   function findInputByLabel(scope, labels) {
     const scan = scope || document;
-    const labelEls = Array.from(scan.querySelectorAll("label, span, div, dt, p, th"))
+    const allMatching = Array.from(scan.querySelectorAll("label, span, div, dt, p, th"))
       .filter(isVisible)
       .filter((el) => {
         const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
         return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      })
-      // The expense list on the left has a column header literally named "金额"
-      // and "费用类型" etc. If we let those match, we'd walk up to a high
-      // ancestor that contains both the table AND the drawer, then pickFillable
-      // returns the FIRST input in DOM order — which is usually the city
-      // combobox in the drawer, not the amount field. Skipping anything that
-      // lives inside table chrome leaves only the drawer's real form labels.
-      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
+      });
+    // PREFER drawer labels over table column headers (the expense list on the
+    // left has a "金额" column header that would otherwise win in DOM order).
+    // But if EVERY match happens to be in some grid-roled ancestor, fall back
+    // to the full set rather than returning nothing — a Fusion build with
+    // ARIA role="row" on form items shouldn't disqualify the real label.
+    const nonTable = allMatching.filter((el) => !isInTableScope(el));
+    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
 
     for (const lbl of labelEls) {
       const forId = lbl.getAttribute && lbl.getAttribute("for");
@@ -583,13 +644,14 @@
   }
 
   function findRadioByLabel(scope, labels, optionText) {
-    const labelEls = Array.from((scope || document).querySelectorAll("label, span, div, dt, p, th"))
+    const allMatching = Array.from((scope || document).querySelectorAll("label, span, div, dt, p, th"))
       .filter(isVisible)
       .filter((el) => {
         const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
         return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      })
-      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
+      });
+    const nonTable = allMatching.filter((el) => !isInTableScope(el));
+    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
     for (const lbl of labelEls) {
       let parent = lbl.parentElement;
       for (let i = 0; i < 4 && parent; i++) {
