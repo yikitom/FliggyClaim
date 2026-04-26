@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FliggyClaim 报销助手",
-  "version": "2.3.8",
+  "version": "2.3.9",
   "description": "批量上传报销凭证，自动识别字段并填写到飞猪报销系统。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArhjYEuhyigl2rCHCe6k2bIdhWZ8NXZna1PQx2+tbDK3P4hMR4rMbScQoRqHnQBzfawqEuSi8qgzB6FeQEVL/wNQjuaHjuJ2djffvoC9zD/c9Y2G33kswujHVmOdMlWerdCYZj/HHAY40W/bqptHrAqWDeodk9xuM/ItuK6lzDp/wnoio1I1KyzvWyplLZbPL9OHMORTOUjW4bIp7dF/R2V7EVj3jFUh9uKFSSl+JeP+oQR6tl48gIMTrRNe+l6bAEWEfMu1Che5cm+ir+H4sVevxRA/v05cn0ycxyCf01VN0yqi16fmD8n4eDcYLyKjyAT3PuponnfWda5XKSlbgJQIDAQAB",
   "action": {

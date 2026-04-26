@@ -441,7 +441,7 @@
     const wantAmt = String(rec.amount ?? 0);
     let amt = findInputByLabel(form, LABELS.amount);
     if (amt) {
-      setInputValue(amt, wantAmt);
+      await setInputValue(amt, wantAmt);
       await sleep(180);
       try {
         amt.dispatchEvent(new Event("change", { bubbles: true }));
@@ -453,7 +453,7 @@
       let fresh = findInputByLabel(form, LABELS.amount) || amt;
       if (parseFloat((fresh.value || "0").toString().replace(/,/g, "")) !== parseFloat(wantAmt)) {
         log("amount didn't stick on first pass; retrying. got:", fresh.value, "want:", wantAmt);
-        setInputValue(fresh, wantAmt);
+        await setInputValue(fresh, wantAmt);
         await sleep(180);
         try {
           fresh.dispatchEvent(new Event("change", { bubbles: true }));
@@ -471,7 +471,7 @@
 
     // Note / 详细说明
     const note = findInputByLabel(form, LABELS.note);
-    if (note) setInputValue(note, rec.note || "");
+    if (note) await setInputValue(note, rec.note || "");
     return outcome;
   }
 
@@ -616,44 +616,93 @@
 
   /* ---------- Field setters ---------- */
 
-  function setInputValue(el, value) {
+  // Find the React props bag that React 16+ stashes on every controlled DOM
+  // node (key is `__reactProps$<random>`). This is the dispositive hook for
+  // Fusion / Ant / any React 16+ widget — calling onChange directly bypasses
+  // every event-dispatch / tracker / IME quirk.
+  function getReactProps(el) {
+    if (!el) return null;
+    const k = Object.keys(el).find((s) => s.startsWith("__reactProps$"));
+    return k ? el[k] : null;
+  }
+
+  // Canonical React-16+ "setNativeValue": call the prototype setter (which is
+  // the original native one) instead of the per-instance setter (which React
+  // overrides). Uses Object.getPrototypeOf so it works for subclassed inputs
+  // (Fusion sometimes wraps the input in a custom element constructor chain).
+  function setNativeValue(el, value) {
+    const ownDesc = Object.getOwnPropertyDescriptor(el, "value") || {};
+    const proto = Object.getPrototypeOf(el) || HTMLInputElement.prototype;
+    const protoDesc = Object.getOwnPropertyDescriptor(proto, "value") || {};
+    if (protoDesc.set && ownDesc.set !== protoDesc.set) {
+      protoDesc.set.call(el, value);
+    } else if (ownDesc.set) {
+      ownDesc.set.call(el, value);
+    } else {
+      el.value = value;
+    }
+  }
+
+  async function setInputValue(el, value) {
     if (!el) return false;
     const str = String(value);
     try {
       el.focus();
-      // Strategy A: execCommand insertText. Fires a real `InputEvent` with
-      // inputType="insertText" that Fusion's NumberPicker / Vue v-model /
-      // React controlled inputs all observe. select() first so the new text
-      // replaces rather than appends. This is the most user-like simulation
-      // and works when the prototype-setter trick alone is silently dropped.
+
+      // Strategy A — React fiber direct call. React 16+ stashes the actual
+      // onChange / onInput on the DOM node; calling it bypasses every
+      // dispatch/tracker/IME quirk and is what works when nothing else does.
+      try {
+        const props = getReactProps(el);
+        const handler = props && (props.onChange || props.onInput);
+        if (typeof handler === "function") {
+          // Update the DOM value first so React's handler reads the right
+          // value when it inspects e.target.value.
+          setNativeValue(el, str);
+          const synthetic = {
+            target: el, currentTarget: el,
+            type: "change", bubbles: true, cancelable: true,
+            preventDefault() {}, stopPropagation() {},
+            persist() {}, nativeEvent: null,
+          };
+          handler(synthetic);
+          // NumberPicker's wrapped handler signature is (value, event); try
+          // that shape too if the standard call didn't take.
+          await sleep(60);
+          if (parseFloat((el.value || "0").toString().replace(/,/g, "")) !== parseFloat(str)) {
+            try { handler(str, synthetic); } catch {}
+          }
+          await_dispatch(el, str);
+          await sleep(60);
+          if (parseFloat((el.value || "0").toString().replace(/,/g, "")) === parseFloat(str)) {
+            return true;
+          }
+        }
+      } catch (e) {
+        warn("setInputValue strategy A (react props) failed:", e);
+      }
+
+      // Strategy B — execCommand insertText (real InputEvent). Most reliable
+      // for Vue v-model and components that listen to `input` rather than
+      // hook their own onChange.
       try {
         if (typeof el.select === "function") el.select();
         if (document.execCommand && document.execCommand("insertText", false, str)) {
           if (el.value === str) {
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-            setTimeout(() => {
-              try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
-            }, 0);
+            await_dispatch(el);
             return true;
           }
         }
       } catch {}
 
-      // Strategy B (fallback): native value setter + React tracker reset.
-      const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      // Strategy C — canonical setNativeValue + tracker reset + dispatch.
       const oldValue = el.value;
-      if (setter) setter.call(el, str);
-      else el.value = str;
+      setNativeValue(el, str);
       const tracker = el._valueTracker;
       if (tracker && typeof tracker.setValue === "function" && oldValue !== str) {
         try { tracker.setValue(oldValue); } catch {}
       }
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: str, inputType: "insertText" }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      setTimeout(() => {
-        try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
-      }, 0);
+      await_dispatch(el, str);
       return true;
     } catch (e) {
       warn("setInputValue failed:", e);
@@ -661,16 +710,31 @@
     }
   }
 
+  // Fire input + change synchronously, blur on next tick (Fusion's onBlur
+  // reformatter races with React's batched commit if blur is sync).
+  function await_dispatch(el, str) {
+    try {
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: str || el.value, inputType: "insertText" }));
+    } catch {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    setTimeout(() => {
+      try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
+    }, 0);
+  }
+
+
   async function setDateLikeValue(el, iso) {
     if (!el || !iso) return false;
-    if (el.type === "date") return setInputValue(el, iso);
+    if (el.type === "date") return await setInputValue(el, iso);
 
     el.focus();
     el.click();
-    setInputValue(el, iso);
+    await setInputValue(el, iso);
     await sleep(200);
     // Some pickers want YYYY/MM/DD typed
-    setInputValue(el, iso.replaceAll("-", "/"));
+    await setInputValue(el, iso.replaceAll("-", "/"));
     await sleep(150);
     el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     // close the picker by clicking elsewhere
@@ -852,6 +916,12 @@
   function describeInputFull(el) {
     if (!el) return null;
     const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    // React 16+ stashes props as __reactProps$<random>. Surface which handlers
+    // are present — onChange/onInput/onBlur tell us we can drive the field
+    // via Strategy A (fiber call) regardless of event-dispatch quirks.
+    const reactKey = Object.keys(el).find((s) => s.startsWith("__reactProps$"));
+    const props = reactKey ? el[reactKey] : null;
+    const handlers = props ? Object.keys(props).filter((k) => /^on[A-Z]/.test(k) && typeof props[k] === "function") : [];
     return {
       tag: el.tagName.toLowerCase(),
       type: el.type || null,
@@ -864,6 +934,8 @@
       value: ((el.value ?? el.textContent ?? "") + "").slice(0, 60),
       readonly: !!el.readOnly,
       disabled: !!el.disabled,
+      hasReactProps: !!props,
+      reactHandlers: handlers,
       rect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null,
     };
   }
