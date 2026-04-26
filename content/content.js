@@ -761,6 +761,11 @@
       // resolves to in the currently-open drawer (open one manually before
       // running 诊断 to populate this).
       formProbes: probeLabels(form),
+      // Deep DOM dump around every "金额"-ish label in the page. This is the
+      // dispositive diagnostic for "amount won't write" — it shows which
+      // element findInputByLabel landed on, what's actually around the label
+      // in the DOM, and whether our table-skip filter is too aggressive.
+      amountDeepProbe: deepProbeAmount(form),
       // Records the popup is about to send (or just sent). Confirms the
       // chrome message payload carries amount/currency/etc end-to-end.
       pendingRecords: Array.isArray(records) ? records.map((r) => ({
@@ -770,6 +775,96 @@
       })) : null,
       lastFillSummary,
       currentVisibleLabels: collectVisibleLabels(),
+    };
+  }
+
+  function deepProbeAmount(form) {
+    if (!form) {
+      return { error: "no form open — open a 费用 drawer manually then run 诊断 again" };
+    }
+    const labelTexts = LABELS.amount;
+    const allMatching = Array.from(form.querySelectorAll("label, span, div, dt, p, th, strong, em, li, b"))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
+        return labelTexts.some((l) => t === l || t === l + "：" || t === l + ":");
+      });
+    const tableSkipSel = "th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']";
+    const probes = allMatching.slice(0, 8).map((lbl, i) => ({
+      idx: i,
+      tag: lbl.tagName.toLowerCase(),
+      cls: (lbl.className || "").toString().slice(0, 200),
+      text: (lbl.textContent || "").trim().slice(0, 40),
+      parentTag: lbl.parentElement?.tagName.toLowerCase(),
+      parentCls: (lbl.parentElement?.className || "").toString().slice(0, 200),
+      grandparentCls: (lbl.parentElement?.parentElement?.className || "").toString().slice(0, 200),
+      excludedByTableFilter: !!lbl.closest(tableSkipSel),
+      excludingAncestor: lbl.closest(tableSkipSel)?.tagName.toLowerCase() || null,
+      outerHtml: lbl.outerHTML.slice(0, 400),
+      // Inputs found by walking from this label
+      siblingInputs: collectNeighborInputs(lbl),
+    }));
+    // Now show what findInputByLabel actually returns
+    const resolved = findInputByLabel(form, labelTexts);
+    // And dump all input-like elements in the form for context
+    const allInputs = Array.from(form.querySelectorAll('input, textarea, [role="combobox"], [role="spinbutton"], [contenteditable="true"]'))
+      .filter(isVisible)
+      .slice(0, 25)
+      .map(describeInputFull);
+    return {
+      labelMatchCount: allMatching.length,
+      probes,
+      resolvedByFindInputByLabel: describeInputFull(resolved),
+      allFormInputs: allInputs,
+    };
+  }
+
+  function collectNeighborInputs(lbl) {
+    const out = [];
+    let cur = lbl;
+    for (let i = 0; i < 4; i++) {
+      cur = cur.nextElementSibling;
+      if (!cur) break;
+      const inps = cur.querySelectorAll
+        ? Array.from(cur.querySelectorAll('input, textarea, [role="combobox"], [role="spinbutton"], [contenteditable="true"]'))
+        : [];
+      for (const el of inps) {
+        if (isVisible(el)) out.push({ via: `nextSibling+${i + 1}`, ...describeInputFull(el) });
+      }
+    }
+    let parent = lbl.parentElement;
+    for (let i = 0; i < 3 && parent; i++) {
+      let sib = parent.nextElementSibling;
+      for (let j = 0; j < 3 && sib; j++) {
+        const inps = sib.querySelectorAll
+          ? Array.from(sib.querySelectorAll('input, textarea, [role="combobox"], [role="spinbutton"], [contenteditable="true"]'))
+          : [];
+        for (const el of inps) {
+          if (isVisible(el)) out.push({ via: `parent^${i + 1}.nextSib+${j + 1}`, ...describeInputFull(el) });
+        }
+        sib = sib.nextElementSibling;
+      }
+      parent = parent.parentElement;
+    }
+    return out.slice(0, 12);
+  }
+
+  function describeInputFull(el) {
+    if (!el) return null;
+    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    return {
+      tag: el.tagName.toLowerCase(),
+      type: el.type || null,
+      role: el.getAttribute && el.getAttribute("role"),
+      cls: (el.className || "").toString().slice(0, 200),
+      name: el.name || null,
+      id: el.id || null,
+      ariaLabel: el.getAttribute && el.getAttribute("aria-label"),
+      placeholder: el.placeholder || null,
+      value: ((el.value ?? el.textContent ?? "") + "").slice(0, 60),
+      readonly: !!el.readOnly,
+      disabled: !!el.disabled,
+      rect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null,
     };
   }
 
