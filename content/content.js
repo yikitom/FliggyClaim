@@ -413,11 +413,21 @@
       el.focus();
       const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      const oldValue = el.value;
       if (setter) setter.call(el, value);
       else el.value = value;
+      // Without this, Fusion/React-controlled InputNumber sees no diff and reverts to 0.
+      const tracker = el._valueTracker;
+      if (tracker && typeof tracker.setValue === "function" && oldValue !== value) {
+        try { tracker.setValue(oldValue); } catch {}
+      }
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      el.dispatchEvent(new Event("blur", { bubbles: true }));
+      // Defer blur: an InputNumber's onBlur reformatter races with React's batched
+      // state commit and would revert the value to 0 if dispatched synchronously.
+      setTimeout(() => {
+        try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
+      }, 0);
       return true;
     } catch (e) {
       warn("setInputValue failed:", e);
