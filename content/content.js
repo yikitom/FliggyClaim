@@ -20,9 +20,7 @@
   }
 
   const log = (...a) => console.log("%c[FliggyClaim]", "color:#d71e1e;font-weight:bold", ...a);
-  // Use console.log (not console.warn) so non-fatal "skip and fall back" notices
-  // don't show up as red errors on chrome://extensions.
-  const warn = (...a) => console.log("%c[FliggyClaim]%c warn:", "color:#d71e1e;font-weight:bold", "color:#b06000;font-weight:bold", ...a);
+  const warn = (...a) => console.warn("%c[FliggyClaim]", "color:#d71e1e;font-weight:bold", ...a);
 
   log("content script loaded on", location.href, "frame:", window.top === window ? "top" : "iframe");
 
@@ -43,6 +41,8 @@
     city: ["费用发生城市", "发生城市", "城市"],
     amount: ["金额", "费用金额", "总金额"],
     currency: ["币种", "货币", "Currency"],
+    rate: ["汇率", "Exchange Rate"],
+    convertedAmount: ["折算金额", "本位币金额", "报销金额", "申请金额"],
     note: ["详细说明", "备注", "说明", "事由"],
     rideshare: ["是否网约车"],
     flightFrom: ["出发城市", "出发地"],
@@ -71,7 +71,7 @@
       return false;
     }
     if (msg.type === "FLIGGY_FILL") {
-      fillRecords(msg.records || [])
+      fillRecords(msg.records || [], msg.attachments || {})
         .then((res) => sendResponse({ ok: true, ...res }))
         .catch((err) => {
           warn("fill error:", err);
@@ -83,31 +83,35 @@
 
   /* ---------- Public flow ---------- */
 
-  async function fillRecords(records) {
-    log(`starting fill: ${records.length} records`);
+  async function fillRecords(records, attachments) {
+    log(`starting fill: ${records.length} records`,
+      `attachments: ${Object.keys(attachments || {}).length}`);
     let filled = 0;
+    let attached = 0;
     showOverlay(`准备写入 ${records.length} 条…`);
     for (let i = 0; i < records.length; i++) {
       const rec = records[i];
+      const att = attachments && attachments[rec.source];
       showOverlay(`写入第 ${i + 1} / ${records.length} 条 (${rec.type})…`);
       try {
-        await fillSingleExpense(rec);
+        const result = await fillSingleExpense(rec, att);
         filled++;
-        log(`✓ filled record ${i + 1}/${records.length}`, rec);
+        if (result && result.attached) attached++;
+        log(`✓ filled record ${i + 1}/${records.length}`, rec, result);
       } catch (e) {
         warn(`× record ${i + 1}/${records.length} failed:`, rec, e);
         await tryCancelDrawer();
       }
       await sleep(700);
     }
-    hideOverlay(`已写入 ${filled} / ${records.length} 条`);
+    hideOverlay(`已写入 ${filled} / ${records.length} 条 (附件 ${attached})`);
     if (filled === 0) {
       throw new Error("0 条写入成功——请打开 DevTools 控制台查看 [FliggyClaim] 日志");
     }
-    return { filled };
+    return { filled, attached };
   }
 
-  async function fillSingleExpense(rec) {
+  async function fillSingleExpense(rec, attachment) {
     // 1. Click "新增费用"
     const addBtn = findAddExpenseButton();
     if (!addBtn) throw new Error("没找到「新增费用」按钮");
@@ -131,6 +135,12 @@
     // 5. Fill fields based on visible labels in the form
     await fillFormFields(form, rec, formTitle);
 
+    // 5b. Attach the source receipt file (if popup provided one)
+    let attached = false;
+    if (attachment && attachment.data) {
+      attached = await attachReceiptFile(form, attachment, rec.source);
+    }
+
     // 6. Click 保存 inside the form
     const saveBtn = findSaveButton(form);
     if (!saveBtn) throw new Error("没找到表单内的「保存」按钮");
@@ -139,6 +149,49 @@
 
     // 7. Wait for drawer to close (form vanishes)
     await waitFor(() => !findCategoryForm(), 6000, "drawer close");
+    return { attached };
+  }
+
+  /* ---------- File attachment ---------- */
+
+  async function attachReceiptFile(form, att, filename) {
+    try {
+      const input = findFileInput(form);
+      if (!input) {
+        log("no file input found in form, skipping attachment for", filename);
+        return false;
+      }
+      const dataUrl = `data:${att.mime || "application/octet-stream"};base64,${att.data}`;
+      const blob = await fetch(dataUrl).then((r) => r.blob());
+      const file = new File([blob], filename, { type: att.mime || blob.type });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      try {
+        input.files = dt.files;
+      } catch {
+        // Fallback for non-standard file inputs.
+        Object.defineProperty(input, "files", { value: dt.files, configurable: true });
+      }
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      log(`→ attached ${filename} (${file.size} B) to`, input);
+      // Wait briefly for the upload component to register and show progress.
+      await sleep(1500);
+      return true;
+    } catch (e) {
+      warn("attach failed:", filename, e);
+      return false;
+    }
+  }
+
+  function findFileInput(scope) {
+    // Look for any enabled file input within this drawer/form scope.
+    const inputs = Array.from((scope || document).querySelectorAll('input[type="file"]'));
+    return (
+      inputs.find((i) => !i.disabled && !i.readOnly) ||
+      inputs[0] ||
+      null
+    );
   }
 
   /* ---------- Discovery helpers ---------- */
@@ -291,18 +344,60 @@
       if (yes) clickEl(yes);
     }
 
-    // Amount
-    const amt = findInputByLabel(form, LABELS.amount);
-    if (amt) setInputValue(amt, String(rec.amount ?? 0));
-    else warn("amount label not found in form");
-
-    // Currency – form usually defaults to SGD; force-change
+    // Currency MUST be set before amount: TAE clears the amount field
+    // when the currency changes (and re-fetches the FX rate against the
+    // report's base currency). Filling amount first would be silently wiped.
     const cur = findInputByLabel(form, LABELS.currency);
-    if (cur) await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
+    if (cur) {
+      await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
+      // Give TAE time to fire the FX-rate request triggered by the change.
+      await sleep(450);
+    }
+
+    // Amount – set after currency, then nudge the form to recompute the
+    // converted (本位币) amount.
+    const amt = findInputByLabel(form, LABELS.amount);
+    if (amt) {
+      setInputValue(amt, String(rec.amount ?? 0));
+      await sleep(120);
+      // Explicit blur + change re-fires the FX recalculation in TAE.
+      try {
+        amt.dispatchEvent(new Event("change", { bubbles: true }));
+        amt.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+      } catch {}
+      // Click outside the field to dismiss any popover that might be
+      // suppressing the rate fetch.
+      document.body.click();
+      // Wait briefly for the FX rate / converted amount to populate.
+      await waitForRatePopulated(form, 2500);
+    } else {
+      warn("amount label not found in form");
+    }
 
     // Note / 详细说明
     const note = findInputByLabel(form, LABELS.note);
     if (note) setInputValue(note, rec.note || "");
+  }
+
+  // Poll the form for a non-zero exchange rate or converted amount.
+  // When the record's currency equals the report base currency, both fields
+  // are usually absent — in that case we just return after the timeout.
+  async function waitForRatePopulated(form, timeoutMs) {
+    const start = Date.now();
+    const looksFilled = (el) => {
+      if (!el) return false;
+      const v = (el.value ?? el.textContent ?? "").toString().trim();
+      if (!v) return false;
+      const n = parseFloat(v.replace(/,/g, ""));
+      return !isNaN(n) && n > 0;
+    };
+    while (Date.now() - start < timeoutMs) {
+      const rateEl = findInputByLabel(form, LABELS.rate);
+      const convEl = findInputByLabel(form, LABELS.convertedAmount);
+      if (looksFilled(rateEl) || looksFilled(convEl)) return true;
+      await sleep(120);
+    }
+    return false;
   }
 
   function currencyDisplay(code) {
