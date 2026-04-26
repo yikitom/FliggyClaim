@@ -218,6 +218,10 @@ async function parseAll() {
   setTimeout(() => {
     $("#parseProgress").hidden = true;
   }, 600);
+  // Release the tesseract worker (~150MB) once the batch is done.
+  if (FliggyParser.terminateOcr) {
+    FliggyParser.terminateOcr().catch(() => {});
+  }
   toast(`解析完成，共 ${newRecords.length} 条`);
   switchTab("parsed");
 }
@@ -404,14 +408,21 @@ async function importToSystem() {
   if (state.records.length === 0) return;
   try {
     await withTab(async (tab) => {
-      console.log("[FliggyClaim] sending FLIGGY_FILL to tab", tab.id, tab.url);
+      const attachments = await buildAttachmentsMap(state.records);
+      const attCount = Object.keys(attachments).length;
+      console.log("[FliggyClaim] sending FLIGGY_FILL to tab", tab.id, tab.url, {
+        records: state.records.length,
+        attachments: attCount,
+      });
       const resp = await chrome.tabs.sendMessage(tab.id, {
         type: "FLIGGY_FILL",
         records: state.records,
+        attachments,
       });
       console.log("[FliggyClaim] FLIGGY_FILL response:", resp);
       if (resp && resp.ok) {
-        toast(`已写入 ${resp.filled} / ${state.records.length} 条到报销系统`);
+        const tail = resp.attached != null ? `, 附件 ${resp.attached}` : "";
+        toast(`已写入 ${resp.filled} / ${state.records.length} 条到报销系统${tail}`);
       } else {
         toast(resp?.error || "写入失败，请打开 DevTools 查看日志", "error");
       }
@@ -422,10 +433,68 @@ async function importToSystem() {
   }
 }
 
+async function buildAttachmentsMap(records) {
+  // Records are persisted to chrome.storage.local but the original File
+  // objects are not — they only live in state.files for the current popup
+  // session. Match by filename; warn but don't fail if a file is missing.
+  const out = {};
+  const byName = new Map();
+  for (const f of state.files.values()) byName.set(f.name, f);
+  for (const rec of records) {
+    if (out[rec.source]) continue;
+    const file = byName.get(rec.source);
+    if (!file) {
+      console.warn("[FliggyClaim] no original file for", rec.source,
+        "— popup may have been reopened; record will be filled without attachment");
+      continue;
+    }
+    try {
+      const data = await fileToBase64Bytes(file);
+      out[rec.source] = {
+        data,
+        mime: file.type || guessMime(rec.source),
+        size: file.size,
+      };
+    } catch (e) {
+      console.warn("[FliggyClaim] base64 encode failed for", rec.source, e);
+    }
+  }
+  return out;
+}
+
+function fileToBase64Bytes(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const s = fr.result || "";
+      const idx = s.indexOf(",");
+      resolve(idx >= 0 ? s.slice(idx + 1) : s);
+    };
+    fr.onerror = reject;
+    fr.readAsDataURL(file);
+  });
+}
+
+function guessMime(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  return {
+    pdf: "application/pdf",
+    png: "image/png",
+    jpg: "image/jpeg", jpeg: "image/jpeg",
+    webp: "image/webp",
+    heic: "image/heic", heif: "image/heif",
+    bmp: "image/bmp", gif: "image/gif",
+    tif: "image/tiff", tiff: "image/tiff",
+  }[ext] || "application/octet-stream";
+}
+
 async function runDiagnostics() {
   try {
     await withTab(async (tab) => {
-      const resp = await chrome.tabs.sendMessage(tab.id, { type: "FLIGGY_DIAG" });
+      const resp = await chrome.tabs.sendMessage(tab.id, {
+        type: "FLIGGY_DIAG",
+        records: state.records,
+      });
       console.log("[FliggyClaim] diagnostic response:", resp);
       if (resp && resp.ok) {
         const text = JSON.stringify(resp.report, null, 2);

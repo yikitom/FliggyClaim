@@ -20,9 +20,7 @@
   }
 
   const log = (...a) => console.log("%c[FliggyClaim]", "color:#d71e1e;font-weight:bold", ...a);
-  // Use console.log (not console.warn) so non-fatal "skip and fall back" notices
-  // don't show up as red errors on chrome://extensions.
-  const warn = (...a) => console.log("%c[FliggyClaim]%c warn:", "color:#d71e1e;font-weight:bold", "color:#b06000;font-weight:bold", ...a);
+  const warn = (...a) => console.warn("%c[FliggyClaim]", "color:#d71e1e;font-weight:bold", ...a);
 
   log("content script loaded on", location.href, "frame:", window.top === window ? "top" : "iframe");
 
@@ -43,6 +41,8 @@
     city: ["费用发生城市", "发生城市", "城市"],
     amount: ["金额", "费用金额", "总金额"],
     currency: ["币种", "货币", "Currency"],
+    rate: ["汇率", "Exchange Rate"],
+    convertedAmount: ["折算金额", "本位币金额", "报销金额", "申请金额"],
     note: ["详细说明", "备注", "说明", "事由"],
     rideshare: ["是否网约车"],
     flightFrom: ["出发城市", "出发地"],
@@ -64,14 +64,14 @@
     }
     if (msg.type === "FLIGGY_DIAG") {
       try {
-        sendResponse({ ok: true, report: diagnose() });
+        sendResponse({ ok: true, report: diagnose(msg.records || null) });
       } catch (err) {
         sendResponse({ ok: false, error: err?.message || String(err) });
       }
       return false;
     }
     if (msg.type === "FLIGGY_FILL") {
-      fillRecords(msg.records || [])
+      fillRecords(msg.records || [], msg.attachments || {})
         .then((res) => sendResponse({ ok: true, ...res }))
         .catch((err) => {
           warn("fill error:", err);
@@ -83,31 +83,52 @@
 
   /* ---------- Public flow ---------- */
 
-  async function fillRecords(records) {
-    log(`starting fill: ${records.length} records`);
+  async function fillRecords(records, attachments) {
+    log(`starting fill: ${records.length} records`,
+      `attachments: ${Object.keys(attachments || {}).length}`);
     let filled = 0;
+    let attached = 0;
+    const perRecord = [];
     showOverlay(`准备写入 ${records.length} 条…`);
     for (let i = 0; i < records.length; i++) {
       const rec = records[i];
+      const att = attachments && attachments[rec.source];
       showOverlay(`写入第 ${i + 1} / ${records.length} 条 (${rec.type})…`);
+      const slot = {
+        index: i + 1,
+        type: rec.type, currency: rec.currency, amount: rec.amount,
+        ok: false, error: null, amountFinal: null,
+      };
       try {
-        await fillSingleExpense(rec);
+        const result = await fillSingleExpense(rec, att);
         filled++;
-        log(`✓ filled record ${i + 1}/${records.length}`, rec);
+        if (result && result.attached) attached++;
+        slot.ok = true;
+        slot.amountFinal = result?.amountFinal ?? null;
+        log(`✓ filled record ${i + 1}/${records.length}`, rec, result);
       } catch (e) {
         warn(`× record ${i + 1}/${records.length} failed:`, rec, e);
+        slot.error = e?.message || String(e);
         await tryCancelDrawer();
       }
+      perRecord.push(slot);
       await sleep(700);
     }
-    hideOverlay(`已写入 ${filled} / ${records.length} 条`);
+    lastFillSummary = {
+      at: new Date().toISOString(),
+      total: records.length,
+      filled,
+      attached,
+      perRecord,
+    };
+    hideOverlay(`已写入 ${filled} / ${records.length} 条 (附件 ${attached})`);
     if (filled === 0) {
       throw new Error("0 条写入成功——请打开 DevTools 控制台查看 [FliggyClaim] 日志");
     }
-    return { filled };
+    return { filled, attached };
   }
 
-  async function fillSingleExpense(rec) {
+  async function fillSingleExpense(rec, attachment) {
     // 1. Click "新增费用"
     const addBtn = findAddExpenseButton();
     if (!addBtn) throw new Error("没找到「新增费用」按钮");
@@ -129,7 +150,13 @@
     log("→ category form opened, title:", formTitle, form);
 
     // 5. Fill fields based on visible labels in the form
-    await fillFormFields(form, rec, formTitle);
+    const fillOutcome = await fillFormFields(form, rec, formTitle);
+
+    // 5b. Attach the source receipt file (if popup provided one)
+    let attached = false;
+    if (attachment && attachment.data) {
+      attached = await attachReceiptFile(form, attachment, rec.source);
+    }
 
     // 6. Click 保存 inside the form
     const saveBtn = findSaveButton(form);
@@ -139,6 +166,49 @@
 
     // 7. Wait for drawer to close (form vanishes)
     await waitFor(() => !findCategoryForm(), 6000, "drawer close");
+    return { attached, amountFinal: fillOutcome?.amountFinal ?? null, amountInput: fillOutcome?.amountInput ?? null };
+  }
+
+  /* ---------- File attachment ---------- */
+
+  async function attachReceiptFile(form, att, filename) {
+    try {
+      const input = findFileInput(form);
+      if (!input) {
+        log("no file input found in form, skipping attachment for", filename);
+        return false;
+      }
+      const dataUrl = `data:${att.mime || "application/octet-stream"};base64,${att.data}`;
+      const blob = await fetch(dataUrl).then((r) => r.blob());
+      const file = new File([blob], filename, { type: att.mime || blob.type });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      try {
+        input.files = dt.files;
+      } catch {
+        // Fallback for non-standard file inputs.
+        Object.defineProperty(input, "files", { value: dt.files, configurable: true });
+      }
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      log(`→ attached ${filename} (${file.size} B) to`, input);
+      // Wait briefly for the upload component to register and show progress.
+      await sleep(1500);
+      return true;
+    } catch (e) {
+      warn("attach failed:", filename, e);
+      return false;
+    }
+  }
+
+  function findFileInput(scope) {
+    // Look for any enabled file input within this drawer/form scope.
+    const inputs = Array.from((scope || document).querySelectorAll('input[type="file"]'));
+    return (
+      inputs.find((i) => !i.disabled && !i.readOnly) ||
+      inputs[0] ||
+      null
+    );
   }
 
   /* ---------- Discovery helpers ---------- */
@@ -196,15 +266,22 @@
   }
 
   function findCategoryForm() {
-    // Form has a header like "差旅-餐费" / "差旅-住宿" etc., and 保存 button
+    // Form has a header like "差旅-餐费" / "差旅-住宿" etc., and 保存 button.
+    // The expense table on the left ALSO renders these strings as cell values,
+    // so we skip any title inside table chrome — otherwise the walk-up from
+    // a table cell ends at the page-level container (which then makes label
+    // lookups inside the "form" stray into the wrong drawer fields).
     const titles = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span"))
       .filter(isVisible)
-      .filter((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12);
+      .filter((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12)
+      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
     for (const t of titles) {
       let cur = t;
-      for (let i = 0; i < 10 && cur; i++) {
+      // Walk up only a handful of levels — the drawer body is typically 2–4
+      // ancestors above the title; going to 10 risks crossing into a shared
+      // page wrapper that also contains unrelated forms.
+      for (let i = 0; i < 6 && cur; i++) {
         if (cur.querySelector && cur.querySelector("input, textarea, select")) {
-          // Confirm it has a 保存 button somewhere inside
           const save = Array.from(cur.querySelectorAll("button"))
             .filter(isVisible)
             .find((b) => /^保存/.test((b.textContent || "").trim()));
@@ -271,6 +348,7 @@
   async function fillFormFields(form, rec, formTitle) {
     const isHotel = /住宿|酒店/.test(formTitle);
     const isTaxi = /打车|出租/.test(formTitle);
+    const outcome = { amountFinal: null, amountInput: null };
 
     // Common fields
     if (isHotel) {
@@ -291,18 +369,77 @@
       if (yes) clickEl(yes);
     }
 
-    // Amount
-    const amt = findInputByLabel(form, LABELS.amount);
-    if (amt) setInputValue(amt, String(rec.amount ?? 0));
-    else warn("amount label not found in form");
-
-    // Currency – form usually defaults to SGD; force-change
+    // Currency MUST be set before amount: TAE clears the amount field
+    // when the currency changes (and re-fetches the FX rate against the
+    // report's base currency). Filling amount first would be silently wiped.
     const cur = findInputByLabel(form, LABELS.currency);
-    if (cur) await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
+    if (cur) {
+      await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
+      // Give TAE time to fire the FX-rate request triggered by the change.
+      await sleep(450);
+    }
+
+    // Amount – set after currency, then nudge the form to recompute the
+    // converted (本位币) amount. Verify after each strategy and fall back
+    // to a fresh element lookup + retry if the value was silently dropped
+    // (which happens when currency change re-mounted the InputNumber after
+    // we cached a stale node reference).
+    const wantAmt = String(rec.amount ?? 0);
+    let amt = findInputByLabel(form, LABELS.amount);
+    if (amt) {
+      setInputValue(amt, wantAmt);
+      await sleep(180);
+      try {
+        amt.dispatchEvent(new Event("change", { bubbles: true }));
+        amt.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+      } catch {}
+      document.body.click();
+      // Verify and retry once with a fresh node lookup if the value vanished.
+      await sleep(120);
+      let fresh = findInputByLabel(form, LABELS.amount) || amt;
+      if (parseFloat((fresh.value || "0").toString().replace(/,/g, "")) !== parseFloat(wantAmt)) {
+        log("amount didn't stick on first pass; retrying. got:", fresh.value, "want:", wantAmt);
+        setInputValue(fresh, wantAmt);
+        await sleep(180);
+        try {
+          fresh.dispatchEvent(new Event("change", { bubbles: true }));
+          fresh.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+        } catch {}
+        document.body.click();
+      }
+      log("amount final value:", fresh.value);
+      outcome.amountFinal = fresh.value;
+      outcome.amountInput = describeInput(fresh);
+      await waitForRatePopulated(form, 2500);
+    } else {
+      warn("amount label not found in form");
+    }
 
     // Note / 详细说明
     const note = findInputByLabel(form, LABELS.note);
     if (note) setInputValue(note, rec.note || "");
+    return outcome;
+  }
+
+  // Poll the form for a non-zero exchange rate or converted amount.
+  // When the record's currency equals the report base currency, both fields
+  // are usually absent — in that case we just return after the timeout.
+  async function waitForRatePopulated(form, timeoutMs) {
+    const start = Date.now();
+    const looksFilled = (el) => {
+      if (!el) return false;
+      const v = (el.value ?? el.textContent ?? "").toString().trim();
+      if (!v) return false;
+      const n = parseFloat(v.replace(/,/g, ""));
+      return !isNaN(n) && n > 0;
+    };
+    while (Date.now() - start < timeoutMs) {
+      const rateEl = findInputByLabel(form, LABELS.rate);
+      const convEl = findInputByLabel(form, LABELS.convertedAmount);
+      if (looksFilled(rateEl) || looksFilled(convEl)) return true;
+      await sleep(120);
+    }
+    return false;
   }
 
   function currencyDisplay(code) {
@@ -342,7 +479,14 @@
       .filter((el) => {
         const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
         return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      });
+      })
+      // The expense list on the left has a column header literally named "金额"
+      // and "费用类型" etc. If we let those match, we'd walk up to a high
+      // ancestor that contains both the table AND the drawer, then pickFillable
+      // returns the FIRST input in DOM order — which is usually the city
+      // combobox in the drawer, not the amount field. Skipping anything that
+      // lives inside table chrome leaves only the drawer's real form labels.
+      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
 
     for (const lbl of labelEls) {
       const forId = lbl.getAttribute && lbl.getAttribute("for");
@@ -409,22 +553,39 @@
 
   function setInputValue(el, value) {
     if (!el) return false;
+    const str = String(value);
     try {
       el.focus();
+      // Strategy A: execCommand insertText. Fires a real `InputEvent` with
+      // inputType="insertText" that Fusion's NumberPicker / Vue v-model /
+      // React controlled inputs all observe. select() first so the new text
+      // replaces rather than appends. This is the most user-like simulation
+      // and works when the prototype-setter trick alone is silently dropped.
+      try {
+        if (typeof el.select === "function") el.select();
+        if (document.execCommand && document.execCommand("insertText", false, str)) {
+          if (el.value === str) {
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            setTimeout(() => {
+              try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
+            }, 0);
+            return true;
+          }
+        }
+      } catch {}
+
+      // Strategy B (fallback): native value setter + React tracker reset.
       const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
       const oldValue = el.value;
-      if (setter) setter.call(el, value);
-      else el.value = value;
-      // Without this, Fusion/React-controlled InputNumber sees no diff and reverts to 0.
+      if (setter) setter.call(el, str);
+      else el.value = str;
       const tracker = el._valueTracker;
-      if (tracker && typeof tracker.setValue === "function" && oldValue !== value) {
+      if (tracker && typeof tracker.setValue === "function" && oldValue !== str) {
         try { tracker.setValue(oldValue); } catch {}
       }
-      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: str, inputType: "insertText" }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      // Defer blur: an InputNumber's onBlur reformatter races with React's batched
-      // state commit and would revert the value to 0 if dispatched synchronously.
       setTimeout(() => {
         try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
       }, 0);
@@ -493,14 +654,56 @@
 
   /* ---------- Diagnostics ---------- */
 
-  function diagnose() {
+  // Captured by fillRecords; surfaced via diagnose() so the user can see
+  // exactly what the last import attempt did.
+  let lastFillSummary = null;
+
+  function describeInput(el) {
+    if (!el) return null;
+    return {
+      tag: el.tagName.toLowerCase(),
+      type: el.type || null,
+      cls: (el.className || "").toString().slice(0, 120),
+      value: ((el.value ?? el.textContent ?? "") + "").slice(0, 60),
+      placeholder: el.placeholder || null,
+      readonly: !!el.readOnly,
+      disabled: !!el.disabled,
+      role: el.getAttribute && el.getAttribute("role"),
+    };
+  }
+
+  function probeLabels(form) {
+    if (!form) return null;
+    const out = {};
+    for (const key of ["amount", "currency", "date", "city", "note", "checkin", "checkout"]) {
+      const labels = LABELS[key];
+      if (!labels) continue;
+      out[key] = describeInput(findInputByLabel(form, labels));
+    }
+    return out;
+  }
+
+  function diagnose(records) {
+    const form = findCategoryForm();
     return {
       url: location.href,
       title: document.title,
       isTop: window.top === window,
       addButton: describeMaybe(findAddExpenseButton()),
       categoryPicker: !!findCategoryPicker(),
-      categoryForm: describeMaybe(findCategoryForm()),
+      categoryForm: describeMaybe(form),
+      // Per-label input probe — confirms which actual <input> each label
+      // resolves to in the currently-open drawer (open one manually before
+      // running 诊断 to populate this).
+      formProbes: probeLabels(form),
+      // Records the popup is about to send (or just sent). Confirms the
+      // chrome message payload carries amount/currency/etc end-to-end.
+      pendingRecords: Array.isArray(records) ? records.map((r) => ({
+        type: r.type, date: r.date, currency: r.currency,
+        amount: r.amount, note: (r.note || "").slice(0, 40),
+        source: r.source,
+      })) : null,
+      lastFillSummary,
       currentVisibleLabels: collectVisibleLabels(),
     };
   }

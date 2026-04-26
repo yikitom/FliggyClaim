@@ -9,13 +9,33 @@
     <main class="page">
       <header>
         <h1>FliggyClaim 设置</h1>
-        <p class="sub">可选：配置 OCR / 大模型接口，用于更精准地识别票据。</p>
+        <p class="sub">默认开启本地 OCR（pdf.js + tesseract.js）。可选远程接口用于更精准识别。</p>
       </header>
 
       <section class="card">
         <div class="row">
           <label class="label">
-            <span>启用远程识别</span>
+            <span>本地 OCR（图片识别，离线）</span>
+            <input type="checkbox" id="ocrLocal" checked />
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="label-block">
+            <span>识别语言</span>
+            <select id="ocrLangs">
+              <option value="chi_sim+eng">中文 + 英文</option>
+              <option value="chi_sim">仅中文</option>
+              <option value="eng">仅英文</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <label class="label">
+            <span>启用远程识别（可选）</span>
             <input type="checkbox" id="ocrEnabled" />
           </label>
         </div>
