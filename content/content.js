@@ -351,17 +351,21 @@
     const outcome = { amountFinal: null, amountInput: null };
 
     // Common fields
+    const cityName = rec.city || extractCityFromNote(rec.note) || extractCityFromNote(rec.source) || "上海";
     if (isHotel) {
       const ci = findInputByLabel(form, LABELS.checkin);
-      if (ci) await setDateLikeValue(ci, rec.date);
+      const checkinDate = rec.checkin || rec.date;
+      if (ci) await setDateLikeValue(ci, checkinDate);
       const co = findInputByLabel(form, LABELS.checkout);
-      if (co) await setDateLikeValue(co, addOneDay(rec.date));
-      const city = findInputByLabel(form, LABELS.city);
-      if (city) await setComboboxValue(city, [extractCityFromNote(rec.note) || "上海"]);
+      const checkoutDate = rec.checkout || addNDays(checkinDate, rec.nights || 1);
+      if (co) await setDateLikeValue(co, checkoutDate);
     } else {
       const dateEl = findInputByLabel(form, LABELS.date);
       if (dateEl) await setDateLikeValue(dateEl, rec.date);
     }
+    // 城市 may exist on hotel/meal/taxi/other forms — try unconditionally.
+    const cityEl = findInputByLabel(form, LABELS.city);
+    if (cityEl) await setComboboxValue(cityEl, [cityName]);
 
     if (isTaxi) {
       // 是否网约车 radio – default to 是
@@ -455,17 +459,27 @@
     return m[code] || code;
   }
 
-  function addOneDay(iso) {
+  function addOneDay(iso) { return addNDays(iso, 1); }
+  function addNDays(iso, days) {
     if (!iso) return iso;
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
-    d.setDate(d.getDate() + 1);
+    d.setDate(d.getDate() + (days || 0));
     return d.toISOString().slice(0, 10);
   }
 
   function extractCityFromNote(note) {
     if (!note) return null;
-    const cities = ["北京", "上海", "杭州", "广州", "深圳", "成都", "重庆", "南京", "苏州", "西安", "天津", "厦门", "青岛", "长沙", "郑州", "宁波", "武汉", "香港", "澳门", "曼谷"];
+    const cities = [
+      "北京", "上海", "杭州", "广州", "深圳", "成都", "重庆", "武汉",
+      "南京", "苏州", "西安", "天津", "厦门", "青岛", "长沙", "郑州",
+      "合肥", "宁波", "佛山", "东莞", "无锡", "大连", "沈阳", "哈尔滨",
+      "济南", "福州", "昆明", "南昌", "贵阳", "南宁", "三亚", "海口",
+      "香港", "澳门", "台北", "高雄",
+      "新加坡", "曼谷", "吉隆坡", "雅加达", "马尼拉", "胡志明", "河内",
+      "首尔", "东京", "大阪",
+      "伦敦", "巴黎", "纽约", "旧金山", "洛杉矶", "迪拜",
+    ];
     for (const c of cities) if (note.includes(c)) return c;
     return null;
   }
