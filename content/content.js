@@ -355,20 +355,34 @@
     }
 
     // Amount – set after currency, then nudge the form to recompute the
-    // converted (本位币) amount.
-    const amt = findInputByLabel(form, LABELS.amount);
+    // converted (本位币) amount. Verify after each strategy and fall back
+    // to a fresh element lookup + retry if the value was silently dropped
+    // (which happens when currency change re-mounted the InputNumber after
+    // we cached a stale node reference).
+    const wantAmt = String(rec.amount ?? 0);
+    let amt = findInputByLabel(form, LABELS.amount);
     if (amt) {
-      setInputValue(amt, String(rec.amount ?? 0));
-      await sleep(120);
-      // Explicit blur + change re-fires the FX recalculation in TAE.
+      setInputValue(amt, wantAmt);
+      await sleep(180);
       try {
         amt.dispatchEvent(new Event("change", { bubbles: true }));
         amt.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
       } catch {}
-      // Click outside the field to dismiss any popover that might be
-      // suppressing the rate fetch.
       document.body.click();
-      // Wait briefly for the FX rate / converted amount to populate.
+      // Verify and retry once with a fresh node lookup if the value vanished.
+      await sleep(120);
+      let fresh = findInputByLabel(form, LABELS.amount) || amt;
+      if (parseFloat((fresh.value || "0").toString().replace(/,/g, "")) !== parseFloat(wantAmt)) {
+        log("amount didn't stick on first pass; retrying. got:", fresh.value, "want:", wantAmt);
+        setInputValue(fresh, wantAmt);
+        await sleep(180);
+        try {
+          fresh.dispatchEvent(new Event("change", { bubbles: true }));
+          fresh.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+        } catch {}
+        document.body.click();
+      }
+      log("amount final value:", fresh.value);
       await waitForRatePopulated(form, 2500);
     } else {
       warn("amount label not found in form");
@@ -504,22 +518,39 @@
 
   function setInputValue(el, value) {
     if (!el) return false;
+    const str = String(value);
     try {
       el.focus();
+      // Strategy A: execCommand insertText. Fires a real `InputEvent` with
+      // inputType="insertText" that Fusion's NumberPicker / Vue v-model /
+      // React controlled inputs all observe. select() first so the new text
+      // replaces rather than appends. This is the most user-like simulation
+      // and works when the prototype-setter trick alone is silently dropped.
+      try {
+        if (typeof el.select === "function") el.select();
+        if (document.execCommand && document.execCommand("insertText", false, str)) {
+          if (el.value === str) {
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            setTimeout(() => {
+              try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
+            }, 0);
+            return true;
+          }
+        }
+      } catch {}
+
+      // Strategy B (fallback): native value setter + React tracker reset.
       const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
       const oldValue = el.value;
-      if (setter) setter.call(el, value);
-      else el.value = value;
-      // Without this, Fusion/React-controlled InputNumber sees no diff and reverts to 0.
+      if (setter) setter.call(el, str);
+      else el.value = str;
       const tracker = el._valueTracker;
-      if (tracker && typeof tracker.setValue === "function" && oldValue !== value) {
+      if (tracker && typeof tracker.setValue === "function" && oldValue !== str) {
         try { tracker.setValue(oldValue); } catch {}
       }
-      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: str, inputType: "insertText" }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      // Defer blur: an InputNumber's onBlur reformatter races with React's batched
-      // state commit and would revert the value to 0 if dispatched synchronously.
       setTimeout(() => {
         try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
       }, 0);
