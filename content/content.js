@@ -30,12 +30,14 @@
     hotel: ["差旅-住宿", "住宿", "差旅-酒店"],
     meal: ["差旅-餐费", "差旅-餐饮", "餐费", "餐饮"],
     taxi: ["差旅-打车", "差旅-出租车", "打车"],
+    train: ["差旅-火车", "差旅-高铁", "差旅-动车", "火车", "高铁"],
     other: ["差旅-其他", "差旅-其它", "其他"],
   };
 
   // Each category form's labels we recognize
   const LABELS = {
     date: ["费用发生时间", "发生日期", "消费日期", "费用日期", "日期"],
+    flightDate: ["乘机日期"],
     checkin: ["入住时间"],
     checkout: ["离店时间"],
     city: ["费用发生城市", "发生城市", "城市"],
@@ -47,6 +49,9 @@
     rideshare: ["是否网约车"],
     flightFrom: ["出发城市", "出发地"],
     flightTo: ["到达城市", "到达地", "目的地"],
+    // Hotel: 「酒店住宿相关凭证」is the REQUIRED receipt; generic 「附件」is optional.
+    hotelReceipt: ["酒店住宿相关凭证"],
+    attachment: ["附件"],
   };
 
   if (!window.__fliggyClaimListenerBound) {
@@ -155,7 +160,7 @@
     // 5b. Attach the source receipt file (if popup provided one)
     let attached = false;
     if (attachment && attachment.data) {
-      attached = await attachReceiptFile(form, attachment, rec.source);
+      attached = await attachReceiptFile(form, attachment, rec.source, formTitle);
     }
 
     // 6. Click 保存 inside the form
@@ -171,13 +176,20 @@
 
   /* ---------- File attachment ---------- */
 
-  async function attachReceiptFile(form, att, filename) {
+  async function attachReceiptFile(form, att, filename, formTitle) {
     try {
-      const input = findFileInput(form);
+      const isHotel = /住宿|酒店/.test(formTitle || "");
+      // Hotel forms have TWO file inputs: 酒店住宿相关凭证★ (required) and 附件
+      // (optional). Always prefer the required slot — uploading to 附件 won't
+      // satisfy the validator and 保存 will fail.
+      let input = isHotel ? findFileInputByLabel(form, LABELS.hotelReceipt) : null;
+      if (!input) input = findFileInputByLabel(form, LABELS.attachment);
+      if (!input) input = findFileInput(form);
       if (!input) {
         log("no file input found in form, skipping attachment for", filename);
         return false;
       }
+      log(`→ attaching ${filename} to`, isHotel ? "hotelReceipt slot" : "attachment slot", input);
       const dataUrl = `data:${att.mime || "application/octet-stream"};base64,${att.data}`;
       const blob = await fetch(dataUrl).then((r) => r.blob());
       const file = new File([blob], filename, { type: att.mime || blob.type });
@@ -209,6 +221,37 @@
       inputs[0] ||
       null
     );
+  }
+
+  // Same anchor strategy as findInputByLabel, but specifically for file inputs
+  // (which findInputByLabel/pickFillable deliberately exclude).
+  function findFileInputByLabel(scope, labels) {
+    if (!scope) return null;
+    const labelEls = Array.from(scope.querySelectorAll("label, span, div, dt, p, th"))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
+        return labels.some((l) => t === l || t === l + "：" || t === l + ":");
+      })
+      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
+    const pickFile = (el) => el && el.querySelector
+      ? el.querySelector('input[type="file"]:not([disabled])') : null;
+    for (const lbl of labelEls) {
+      let cur = lbl;
+      for (let i = 0; i < 4; i++) {
+        cur = cur.nextElementSibling;
+        if (!cur) break;
+        const fi = pickFile(cur);
+        if (fi) return fi;
+      }
+      let parent = lbl.parentElement;
+      for (let i = 0; i < 3 && parent; i++) {
+        const fi = pickFile(parent);
+        if (fi) return fi;
+        parent = parent.parentElement;
+      }
+    }
+    return null;
   }
 
   /* ---------- Discovery helpers ---------- */
@@ -348,6 +391,7 @@
   async function fillFormFields(form, rec, formTitle) {
     const isHotel = /住宿|酒店/.test(formTitle);
     const isTaxi = /打车|出租/.test(formTitle);
+    const isFlight = /机票/.test(formTitle);
     const outcome = { amountFinal: null, amountInput: null };
 
     // Common fields
@@ -360,8 +404,14 @@
       const checkoutDate = rec.checkout || addNDays(checkinDate, rec.nights || 1);
       if (co) await setDateLikeValue(co, checkoutDate);
     } else {
+      // 费用发生时间 (optional on most forms, required on none of the screenshots)
       const dateEl = findInputByLabel(form, LABELS.date);
       if (dateEl) await setDateLikeValue(dateEl, rec.date);
+      // 乘机日期★ — only on the flight form, and it IS required.
+      if (isFlight) {
+        const fdEl = findInputByLabel(form, LABELS.flightDate);
+        if (fdEl) await setDateLikeValue(fdEl, rec.date);
+      }
     }
     // 城市 may exist on hotel/meal/taxi/other forms — try unconditionally.
     const cityEl = findInputByLabel(form, LABELS.city);
@@ -538,7 +588,8 @@
       .filter((el) => {
         const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
         return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      });
+      })
+      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
     for (const lbl of labelEls) {
       let parent = lbl.parentElement;
       for (let i = 0; i < 4 && parent; i++) {
