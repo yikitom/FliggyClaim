@@ -249,15 +249,22 @@
   }
 
   function findCategoryForm() {
-    // Form has a header like "差旅-餐费" / "差旅-住宿" etc., and 保存 button
+    // Form has a header like "差旅-餐费" / "差旅-住宿" etc., and 保存 button.
+    // The expense table on the left ALSO renders these strings as cell values,
+    // so we skip any title inside table chrome — otherwise the walk-up from
+    // a table cell ends at the page-level container (which then makes label
+    // lookups inside the "form" stray into the wrong drawer fields).
     const titles = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span"))
       .filter(isVisible)
-      .filter((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12);
+      .filter((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12)
+      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
     for (const t of titles) {
       let cur = t;
-      for (let i = 0; i < 10 && cur; i++) {
+      // Walk up only a handful of levels — the drawer body is typically 2–4
+      // ancestors above the title; going to 10 risks crossing into a shared
+      // page wrapper that also contains unrelated forms.
+      for (let i = 0; i < 6 && cur; i++) {
         if (cur.querySelector && cur.querySelector("input, textarea, select")) {
-          // Confirm it has a 保存 button somewhere inside
           const save = Array.from(cur.querySelectorAll("button"))
             .filter(isVisible)
             .find((b) => /^保存/.test((b.textContent || "").trim()));
@@ -451,7 +458,14 @@
       .filter((el) => {
         const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
         return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      });
+      })
+      // The expense list on the left has a column header literally named "金额"
+      // and "费用类型" etc. If we let those match, we'd walk up to a high
+      // ancestor that contains both the table AND the drawer, then pickFillable
+      // returns the FIRST input in DOM order — which is usually the city
+      // combobox in the drawer, not the amount field. Skipping anything that
+      // lives inside table chrome leaves only the drawer's real form labels.
+      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
 
     for (const lbl of labelEls) {
       const forId = lbl.getAttribute && lbl.getAttribute("for");
