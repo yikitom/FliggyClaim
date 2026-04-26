@@ -597,7 +597,16 @@ body {
 }
 
 .parsed-row.second {
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 96px 1fr;
+  gap: 6px;
+}
+
+.parsed-row.second.with-nights {
+  grid-template-columns: 96px 56px 1fr;
+}
+
+.parsed-row.third {
+  grid-template-columns: 1fr auto;
   gap: 8px;
 }
 

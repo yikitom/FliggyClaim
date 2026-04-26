@@ -273,10 +273,32 @@ function renderParsed() {
   state.records.forEach((rec, idx) => {
     const node = tpl.content.firstElementChild.cloneNode(true);
     node.dataset.idx = idx;
+    const secondRow = node.querySelector(".parsed-row.second");
+    const nightsInp = node.querySelector(".nights");
+    const applyTypeUI = (type) => {
+      const isHotel = type === "hotel";
+      nightsInp.hidden = !isHotel;
+      secondRow.classList.toggle("with-nights", isHotel);
+    };
+
     const typeSel = node.querySelector(".type");
     typeSel.value = rec.type || "other";
+    applyTypeUI(typeSel.value);
     typeSel.addEventListener("change", () => {
-      state.records[idx].type = typeSel.value;
+      const t = typeSel.value;
+      state.records[idx].type = t;
+      // Sync nights for hotel <-> non-hotel transitions.
+      if (t === "hotel") {
+        state.records[idx].nights = state.records[idx].nights || 1;
+        state.records[idx].checkin = state.records[idx].date || null;
+        state.records[idx].checkout = addIsoDays(state.records[idx].date, state.records[idx].nights);
+        nightsInp.value = state.records[idx].nights;
+      } else {
+        state.records[idx].nights = null;
+        state.records[idx].checkin = null;
+        state.records[idx].checkout = null;
+      }
+      applyTypeUI(t);
       persistParsed();
     });
 
@@ -284,8 +306,36 @@ function renderParsed() {
     dateInp.value = rec.date || "";
     dateInp.addEventListener("change", () => {
       state.records[idx].date = dateInp.value;
+      // Hotel checkin tracks the date; recompute checkout from nights.
+      if (state.records[idx].type === "hotel") {
+        state.records[idx].checkin = dateInp.value;
+        state.records[idx].checkout = addIsoDays(
+          dateInp.value,
+          state.records[idx].nights || 1,
+        );
+      }
       persistParsed();
     });
+
+    const cityInp = node.querySelector(".city");
+    cityInp.value = rec.city || "";
+    cityInp.addEventListener("input", () => {
+      state.records[idx].city = cityInp.value.trim() || null;
+    });
+    cityInp.addEventListener("change", persistParsed);
+
+    nightsInp.value = rec.nights || (rec.type === "hotel" ? 1 : "");
+    nightsInp.addEventListener("input", () => {
+      const n = Math.max(1, parseInt(nightsInp.value, 10) || 1);
+      state.records[idx].nights = n;
+      if (state.records[idx].type === "hotel") {
+        state.records[idx].checkout = addIsoDays(
+          state.records[idx].checkin || state.records[idx].date,
+          n,
+        );
+      }
+    });
+    nightsInp.addEventListener("change", persistParsed);
 
     const curSel = node.querySelector(".currency");
     curSel.value = rec.currency || "CNY";
@@ -515,6 +565,14 @@ async function runDiagnostics() {
 }
 
 /* ---------- Settings ---------- */
+function addIsoDays(iso, days) {
+  if (!iso) return iso;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  d.setDate(d.getDate() + (days || 0));
+  return d.toISOString().slice(0, 10);
+}
+
 function bindSettings() {
   $("#settingsBtn").addEventListener("click", () => {
     chrome.runtime.openOptionsPage();

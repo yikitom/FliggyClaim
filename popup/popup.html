@@ -149,6 +149,7 @@
           <select class="field type">
             <option value="flight">机票</option>
             <option value="hotel">酒店</option>
+            <option value="train">火车</option>
             <option value="meal">餐饮</option>
             <option value="taxi">打车</option>
             <option value="other">其他</option>
@@ -166,7 +167,11 @@
           <input class="field amount" type="number" step="0.01" min="0" />
         </div>
         <div class="parsed-row second">
+          <input class="field city" placeholder="城市" />
+          <input class="field nights" type="number" min="1" max="60" step="1" placeholder="夜数" hidden />
           <input class="field note" maxlength="20" placeholder="备注 (≤20字)" />
+        </div>
+        <div class="parsed-row third">
           <span class="src-name" title=""></span>
           <button class="icon-btn small remove-parsed" aria-label="删除" title="删除">
             <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">

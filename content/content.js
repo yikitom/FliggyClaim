@@ -30,12 +30,14 @@
     hotel: ["差旅-住宿", "住宿", "差旅-酒店"],
     meal: ["差旅-餐费", "差旅-餐饮", "餐费", "餐饮"],
     taxi: ["差旅-打车", "差旅-出租车", "打车"],
+    train: ["差旅-火车", "差旅-高铁", "差旅-动车", "火车", "高铁"],
     other: ["差旅-其他", "差旅-其它", "其他"],
   };
 
   // Each category form's labels we recognize
   const LABELS = {
     date: ["费用发生时间", "发生日期", "消费日期", "费用日期", "日期"],
+    flightDate: ["乘机日期"],
     checkin: ["入住时间"],
     checkout: ["离店时间"],
     city: ["费用发生城市", "发生城市", "城市"],
@@ -47,6 +49,9 @@
     rideshare: ["是否网约车"],
     flightFrom: ["出发城市", "出发地"],
     flightTo: ["到达城市", "到达地", "目的地"],
+    // Hotel: 「酒店住宿相关凭证」is the REQUIRED receipt; generic 「附件」is optional.
+    hotelReceipt: ["酒店住宿相关凭证"],
+    attachment: ["附件"],
   };
 
   if (!window.__fliggyClaimListenerBound) {
@@ -144,9 +149,15 @@
     log("→ clicking category leaf", leaf);
     clickEl(leaf);
 
-    // 4. Wait for category form
-    const form = await waitFor(() => findCategoryForm(), 5000, "category form");
-    const formTitle = (form.querySelector("h1, h2, h3, h4")?.textContent || "").trim();
+    // 4. Wait for category form. 10s — TAE drawers occasionally take 2–3s on
+    // first open while the schema loads.
+    const form = await waitFor(() => findCategoryForm(), 10000, "category form");
+    // Title sniff: prefer text that starts with "差旅-" inside the form scope,
+    // else fall back to any heading.
+    const titleEl = Array.from(form.querySelectorAll("h1, h2, h3, h4, div, span"))
+      .filter(isVisible)
+      .find((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12);
+    const formTitle = (titleEl?.textContent || form.querySelector("h1, h2, h3, h4")?.textContent || "").trim();
     log("→ category form opened, title:", formTitle, form);
 
     // 5. Fill fields based on visible labels in the form
@@ -155,7 +166,7 @@
     // 5b. Attach the source receipt file (if popup provided one)
     let attached = false;
     if (attachment && attachment.data) {
-      attached = await attachReceiptFile(form, attachment, rec.source);
+      attached = await attachReceiptFile(form, attachment, rec.source, formTitle);
     }
 
     // 6. Click 保存 inside the form
@@ -171,13 +182,20 @@
 
   /* ---------- File attachment ---------- */
 
-  async function attachReceiptFile(form, att, filename) {
+  async function attachReceiptFile(form, att, filename, formTitle) {
     try {
-      const input = findFileInput(form);
+      const isHotel = /住宿|酒店/.test(formTitle || "");
+      // Hotel forms have TWO file inputs: 酒店住宿相关凭证★ (required) and 附件
+      // (optional). Always prefer the required slot — uploading to 附件 won't
+      // satisfy the validator and 保存 will fail.
+      let input = isHotel ? findFileInputByLabel(form, LABELS.hotelReceipt) : null;
+      if (!input) input = findFileInputByLabel(form, LABELS.attachment);
+      if (!input) input = findFileInput(form);
       if (!input) {
         log("no file input found in form, skipping attachment for", filename);
         return false;
       }
+      log(`→ attaching ${filename} to`, isHotel ? "hotelReceipt slot" : "attachment slot", input);
       const dataUrl = `data:${att.mime || "application/octet-stream"};base64,${att.data}`;
       const blob = await fetch(dataUrl).then((r) => r.blob());
       const file = new File([blob], filename, { type: att.mime || blob.type });
@@ -209,6 +227,85 @@
       inputs[0] ||
       null
     );
+  }
+
+  // Same anchor strategy as findInputByLabel, but specifically for file inputs
+  // (which findInputByLabel/pickFillable deliberately exclude).
+  // Heuristic fallback when findInputByLabel returns nothing for "金额".
+  // Strategy: find any element whose text is exactly "金额" (no parent walk
+  // restrictions, no table-scope filter) and pick the input visually closest
+  // to it on the right or below — the field that LOOKS like the amount cell.
+  function findAmountInputByHeuristic(scope) {
+    const root = scope || document;
+    const labelEls = Array.from(root.querySelectorAll("label, span, div, dt, p, th, em, b, strong"))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
+        return t === "金额" || t === "金额：" || t === "金额:";
+      });
+    if (!labelEls.length) return null;
+    const inputs = Array.from(root.querySelectorAll('input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([disabled]):not([readonly])'))
+      .filter(isVisible)
+      // Skip inputs inside the read-only expense table on the left.
+      .filter((el) => !isInTableScope(el))
+      // Prefer numeric / placeholder-empty inputs that look like amount fields.
+      ;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const lbl of labelEls) {
+      const lr = lbl.getBoundingClientRect();
+      for (const inp of inputs) {
+        const ir = inp.getBoundingClientRect();
+        // Same row (vertical overlap) AND input is to the right of the label,
+        // OR input is directly below the label.
+        const verticalOverlap = Math.min(lr.bottom, ir.bottom) - Math.max(lr.top, ir.top);
+        const horizontalOverlap = Math.min(lr.right, ir.right) - Math.max(lr.left, ir.left);
+        const sameRow = verticalOverlap > 5 && ir.left >= lr.right - 4;
+        const directlyBelow = ir.top >= lr.bottom - 4 && ir.top - lr.bottom < 30 && horizontalOverlap > 20;
+        if (!sameRow && !directlyBelow) continue;
+        // Closer = better. Penalize distance.
+        const dist = sameRow
+          ? (ir.left - lr.right)
+          : (ir.top - lr.bottom + Math.abs((ir.left + ir.right) / 2 - (lr.left + lr.right) / 2));
+        // Bonus for placeholder mentioning 输入 / amount-y attributes.
+        let score = -dist;
+        if (/请输入|amount|\.|0/.test(inp.placeholder || "")) score += 50;
+        if (inp.type === "number") score += 100;
+        if (inp.getAttribute("aria-label") && /金额/.test(inp.getAttribute("aria-label"))) score += 200;
+        if (score > bestScore) { bestScore = score; best = inp; }
+      }
+    }
+    return best;
+  }
+
+  function findFileInputByLabel(scope, labels) {
+    if (!scope) return null;
+    const allMatching = Array.from(scope.querySelectorAll("label, span, div, dt, p, th"))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
+        return labels.some((l) => t === l || t === l + "：" || t === l + ":");
+      });
+    const nonTable = allMatching.filter((el) => !isInTableScope(el));
+    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
+    const pickFile = (el) => el && el.querySelector
+      ? el.querySelector('input[type="file"]:not([disabled])') : null;
+    for (const lbl of labelEls) {
+      let cur = lbl;
+      for (let i = 0; i < 4; i++) {
+        cur = cur.nextElementSibling;
+        if (!cur) break;
+        const fi = pickFile(cur);
+        if (fi) return fi;
+      }
+      let parent = lbl.parentElement;
+      for (let i = 0; i < 3 && parent; i++) {
+        const fi = pickFile(parent);
+        if (fi) return fi;
+        parent = parent.parentElement;
+      }
+    }
+    return null;
   }
 
   /* ---------- Discovery helpers ---------- */
@@ -266,26 +363,31 @@
   }
 
   function findCategoryForm() {
-    // Form has a header like "差旅-餐费" / "差旅-住宿" etc., and 保存 button.
-    // The expense table on the left ALSO renders these strings as cell values,
-    // so we skip any title inside table chrome — otherwise the walk-up from
-    // a table cell ends at the page-level container (which then makes label
-    // lookups inside the "form" stray into the wrong drawer fields).
-    const titles = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span"))
+    // Anchor on the 「保存」 button: the category FORM drawer has one, the
+    // category PICKER drawer does NOT. Walking up from the save button is
+    // far more reliable than walking up from a "差旅-XXX" title text — TAE
+    // nests its form bodies 7–9 levels deep, deeper than is safe to walk
+    // from a title (you'd cross into the page wrapper).
+    // The button's textContent may be "保存", "保存 ▾", "保存▾", or 保存草稿;
+    // accept any starts-with-保存 that isn't 保存草稿.
+    const saves = Array.from(document.querySelectorAll("button"))
       .filter(isVisible)
-      .filter((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12)
-      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
-    for (const t of titles) {
-      let cur = t;
-      // Walk up only a handful of levels — the drawer body is typically 2–4
-      // ancestors above the title; going to 10 risks crossing into a shared
-      // page wrapper that also contains unrelated forms.
-      for (let i = 0; i < 6 && cur; i++) {
-        if (cur.querySelector && cur.querySelector("input, textarea, select")) {
-          const save = Array.from(cur.querySelectorAll("button"))
-            .filter(isVisible)
-            .find((b) => /^保存/.test((b.textContent || "").trim()));
-          if (save) return cur;
+      .filter((b) => {
+        const t = (b.textContent || "").trim();
+        return t.startsWith("保存") && !t.startsWith("保存草稿");
+      });
+    for (const save of saves) {
+      let cur = save.parentElement;
+      // Walk up until we find an ancestor that holds form fields AND looks
+      // like a category form (Chinese form labels we recognize).
+      for (let i = 0; i < 14 && cur; i++) {
+        if (cur.querySelector && cur.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]')) {
+          // Sanity: container should include category-form-ish text — guards
+          // against returning a page-wide wrapper if other 保存 buttons exist.
+          const txt = cur.textContent || "";
+          if (/差旅-|有收据|无收据|费用发生|金额|币种|入住时间|乘机日期/.test(txt)) {
+            return cur;
+          }
         }
         cur = cur.parentElement;
       }
@@ -348,20 +450,31 @@
   async function fillFormFields(form, rec, formTitle) {
     const isHotel = /住宿|酒店/.test(formTitle);
     const isTaxi = /打车|出租/.test(formTitle);
+    const isFlight = /机票/.test(formTitle);
     const outcome = { amountFinal: null, amountInput: null };
 
     // Common fields
+    const cityName = rec.city || extractCityFromNote(rec.note) || extractCityFromNote(rec.source) || "上海";
     if (isHotel) {
       const ci = findInputByLabel(form, LABELS.checkin);
-      if (ci) await setDateLikeValue(ci, rec.date);
+      const checkinDate = rec.checkin || rec.date;
+      if (ci) await setDateLikeValue(ci, checkinDate);
       const co = findInputByLabel(form, LABELS.checkout);
-      if (co) await setDateLikeValue(co, addOneDay(rec.date));
-      const city = findInputByLabel(form, LABELS.city);
-      if (city) await setComboboxValue(city, [extractCityFromNote(rec.note) || "上海"]);
+      const checkoutDate = rec.checkout || addNDays(checkinDate, rec.nights || 1);
+      if (co) await setDateLikeValue(co, checkoutDate);
     } else {
+      // 费用发生时间 (optional on most forms, required on none of the screenshots)
       const dateEl = findInputByLabel(form, LABELS.date);
       if (dateEl) await setDateLikeValue(dateEl, rec.date);
+      // 乘机日期★ — only on the flight form, and it IS required.
+      if (isFlight) {
+        const fdEl = findInputByLabel(form, LABELS.flightDate);
+        if (fdEl) await setDateLikeValue(fdEl, rec.date);
+      }
     }
+    // 城市 may exist on hotel/meal/taxi/other forms — try unconditionally.
+    const cityEl = findInputByLabel(form, LABELS.city);
+    if (cityEl) await setComboboxValue(cityEl, [cityName]);
 
     if (isTaxi) {
       // 是否网约车 radio – default to 是
@@ -386,8 +499,13 @@
     // we cached a stale node reference).
     const wantAmt = String(rec.amount ?? 0);
     let amt = findInputByLabel(form, LABELS.amount);
+    // Last-ditch fallback: if label-anchored lookup returns nothing, find the
+    // input that LOOKS like an amount field — required + numeric placeholder
+    // ("请输入") + sits next to a label whose text contains "金额".
+    if (!amt) amt = findAmountInputByHeuristic(form);
+    log("→ amount input:", amt ? describeInput(amt) : "NOT FOUND");
     if (amt) {
-      setInputValue(amt, wantAmt);
+      await setInputValue(amt, wantAmt);
       await sleep(180);
       try {
         amt.dispatchEvent(new Event("change", { bubbles: true }));
@@ -396,10 +514,10 @@
       document.body.click();
       // Verify and retry once with a fresh node lookup if the value vanished.
       await sleep(120);
-      let fresh = findInputByLabel(form, LABELS.amount) || amt;
+      let fresh = findInputByLabel(form, LABELS.amount) || findAmountInputByHeuristic(form) || amt;
       if (parseFloat((fresh.value || "0").toString().replace(/,/g, "")) !== parseFloat(wantAmt)) {
         log("amount didn't stick on first pass; retrying. got:", fresh.value, "want:", wantAmt);
-        setInputValue(fresh, wantAmt);
+        await setInputValue(fresh, wantAmt);
         await sleep(180);
         try {
           fresh.dispatchEvent(new Event("change", { bubbles: true }));
@@ -412,12 +530,12 @@
       outcome.amountInput = describeInput(fresh);
       await waitForRatePopulated(form, 2500);
     } else {
-      warn("amount label not found in form");
+      warn("amount label not found in form — neither findInputByLabel nor heuristic found a candidate. Run 诊断 to see amountDeepProbe.");
     }
 
     // Note / 详细说明
     const note = findInputByLabel(form, LABELS.note);
-    if (note) setInputValue(note, rec.note || "");
+    if (note) await setInputValue(note, rec.note || "");
     return outcome;
   }
 
@@ -455,38 +573,56 @@
     return m[code] || code;
   }
 
-  function addOneDay(iso) {
+  function addOneDay(iso) { return addNDays(iso, 1); }
+  function addNDays(iso, days) {
     if (!iso) return iso;
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
-    d.setDate(d.getDate() + 1);
+    d.setDate(d.getDate() + (days || 0));
     return d.toISOString().slice(0, 10);
   }
 
   function extractCityFromNote(note) {
     if (!note) return null;
-    const cities = ["北京", "上海", "杭州", "广州", "深圳", "成都", "重庆", "南京", "苏州", "西安", "天津", "厦门", "青岛", "长沙", "郑州", "宁波", "武汉", "香港", "澳门", "曼谷"];
+    const cities = [
+      "北京", "上海", "杭州", "广州", "深圳", "成都", "重庆", "武汉",
+      "南京", "苏州", "西安", "天津", "厦门", "青岛", "长沙", "郑州",
+      "合肥", "宁波", "佛山", "东莞", "无锡", "大连", "沈阳", "哈尔滨",
+      "济南", "福州", "昆明", "南昌", "贵阳", "南宁", "三亚", "海口",
+      "香港", "澳门", "台北", "高雄",
+      "新加坡", "曼谷", "吉隆坡", "雅加达", "马尼拉", "胡志明", "河内",
+      "首尔", "东京", "大阪",
+      "伦敦", "巴黎", "纽约", "旧金山", "洛杉矶", "迪拜",
+    ];
     for (const c of cities) if (note.includes(c)) return c;
     return null;
   }
 
   /* ---------- Label-anchored input finder ---------- */
 
+  // Returns true if the element lives inside actual table chrome OR an ARIA
+  // grid widget. Excluded ARIA roles are intentionally narrow — `row`/`cell`
+  // would also match Fusion form items in some builds, which we DO want.
+  const TABLE_SCOPE_SEL = "th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='gridcell'], [role='grid']";
+  function isInTableScope(el) {
+    return !!(el && el.closest && el.closest(TABLE_SCOPE_SEL));
+  }
+
   function findInputByLabel(scope, labels) {
     const scan = scope || document;
-    const labelEls = Array.from(scan.querySelectorAll("label, span, div, dt, p, th"))
+    const allMatching = Array.from(scan.querySelectorAll("label, span, div, dt, p, th"))
       .filter(isVisible)
       .filter((el) => {
         const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
         return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      })
-      // The expense list on the left has a column header literally named "金额"
-      // and "费用类型" etc. If we let those match, we'd walk up to a high
-      // ancestor that contains both the table AND the drawer, then pickFillable
-      // returns the FIRST input in DOM order — which is usually the city
-      // combobox in the drawer, not the amount field. Skipping anything that
-      // lives inside table chrome leaves only the drawer's real form labels.
-      .filter((el) => !el.closest("th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']"));
+      });
+    // PREFER drawer labels over table column headers (the expense list on the
+    // left has a "金额" column header that would otherwise win in DOM order).
+    // But if EVERY match happens to be in some grid-roled ancestor, fall back
+    // to the full set rather than returning nothing — a Fusion build with
+    // ARIA role="row" on form items shouldn't disqualify the real label.
+    const nonTable = allMatching.filter((el) => !isInTableScope(el));
+    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
 
     for (const lbl of labelEls) {
       const forId = lbl.getAttribute && lbl.getAttribute("for");
@@ -519,12 +655,14 @@
   }
 
   function findRadioByLabel(scope, labels, optionText) {
-    const labelEls = Array.from((scope || document).querySelectorAll("label, span, div, dt, p, th"))
+    const allMatching = Array.from((scope || document).querySelectorAll("label, span, div, dt, p, th"))
       .filter(isVisible)
       .filter((el) => {
         const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
         return labels.some((l) => t === l || t === l + "：" || t === l + ":");
       });
+    const nonTable = allMatching.filter((el) => !isInTableScope(el));
+    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
     for (const lbl of labelEls) {
       let parent = lbl.parentElement;
       for (let i = 0; i < 4 && parent; i++) {
@@ -551,44 +689,93 @@
 
   /* ---------- Field setters ---------- */
 
-  function setInputValue(el, value) {
+  // Find the React props bag that React 16+ stashes on every controlled DOM
+  // node (key is `__reactProps$<random>`). This is the dispositive hook for
+  // Fusion / Ant / any React 16+ widget — calling onChange directly bypasses
+  // every event-dispatch / tracker / IME quirk.
+  function getReactProps(el) {
+    if (!el) return null;
+    const k = Object.keys(el).find((s) => s.startsWith("__reactProps$"));
+    return k ? el[k] : null;
+  }
+
+  // Canonical React-16+ "setNativeValue": call the prototype setter (which is
+  // the original native one) instead of the per-instance setter (which React
+  // overrides). Uses Object.getPrototypeOf so it works for subclassed inputs
+  // (Fusion sometimes wraps the input in a custom element constructor chain).
+  function setNativeValue(el, value) {
+    const ownDesc = Object.getOwnPropertyDescriptor(el, "value") || {};
+    const proto = Object.getPrototypeOf(el) || HTMLInputElement.prototype;
+    const protoDesc = Object.getOwnPropertyDescriptor(proto, "value") || {};
+    if (protoDesc.set && ownDesc.set !== protoDesc.set) {
+      protoDesc.set.call(el, value);
+    } else if (ownDesc.set) {
+      ownDesc.set.call(el, value);
+    } else {
+      el.value = value;
+    }
+  }
+
+  async function setInputValue(el, value) {
     if (!el) return false;
     const str = String(value);
     try {
       el.focus();
-      // Strategy A: execCommand insertText. Fires a real `InputEvent` with
-      // inputType="insertText" that Fusion's NumberPicker / Vue v-model /
-      // React controlled inputs all observe. select() first so the new text
-      // replaces rather than appends. This is the most user-like simulation
-      // and works when the prototype-setter trick alone is silently dropped.
+
+      // Strategy A — React fiber direct call. React 16+ stashes the actual
+      // onChange / onInput on the DOM node; calling it bypasses every
+      // dispatch/tracker/IME quirk and is what works when nothing else does.
+      try {
+        const props = getReactProps(el);
+        const handler = props && (props.onChange || props.onInput);
+        if (typeof handler === "function") {
+          // Update the DOM value first so React's handler reads the right
+          // value when it inspects e.target.value.
+          setNativeValue(el, str);
+          const synthetic = {
+            target: el, currentTarget: el,
+            type: "change", bubbles: true, cancelable: true,
+            preventDefault() {}, stopPropagation() {},
+            persist() {}, nativeEvent: null,
+          };
+          handler(synthetic);
+          // NumberPicker's wrapped handler signature is (value, event); try
+          // that shape too if the standard call didn't take.
+          await sleep(60);
+          if (parseFloat((el.value || "0").toString().replace(/,/g, "")) !== parseFloat(str)) {
+            try { handler(str, synthetic); } catch {}
+          }
+          await_dispatch(el, str);
+          await sleep(60);
+          if (parseFloat((el.value || "0").toString().replace(/,/g, "")) === parseFloat(str)) {
+            return true;
+          }
+        }
+      } catch (e) {
+        warn("setInputValue strategy A (react props) failed:", e);
+      }
+
+      // Strategy B — execCommand insertText (real InputEvent). Most reliable
+      // for Vue v-model and components that listen to `input` rather than
+      // hook their own onChange.
       try {
         if (typeof el.select === "function") el.select();
         if (document.execCommand && document.execCommand("insertText", false, str)) {
           if (el.value === str) {
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-            setTimeout(() => {
-              try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
-            }, 0);
+            await_dispatch(el);
             return true;
           }
         }
       } catch {}
 
-      // Strategy B (fallback): native value setter + React tracker reset.
-      const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      // Strategy C — canonical setNativeValue + tracker reset + dispatch.
       const oldValue = el.value;
-      if (setter) setter.call(el, str);
-      else el.value = str;
+      setNativeValue(el, str);
       const tracker = el._valueTracker;
       if (tracker && typeof tracker.setValue === "function" && oldValue !== str) {
         try { tracker.setValue(oldValue); } catch {}
       }
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: str, inputType: "insertText" }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      setTimeout(() => {
-        try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
-      }, 0);
+      await_dispatch(el, str);
       return true;
     } catch (e) {
       warn("setInputValue failed:", e);
@@ -596,16 +783,31 @@
     }
   }
 
+  // Fire input + change synchronously, blur on next tick (Fusion's onBlur
+  // reformatter races with React's batched commit if blur is sync).
+  function await_dispatch(el, str) {
+    try {
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: str || el.value, inputType: "insertText" }));
+    } catch {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    setTimeout(() => {
+      try { el.dispatchEvent(new Event("blur", { bubbles: true })); } catch {}
+    }, 0);
+  }
+
+
   async function setDateLikeValue(el, iso) {
     if (!el || !iso) return false;
-    if (el.type === "date") return setInputValue(el, iso);
+    if (el.type === "date") return await setInputValue(el, iso);
 
     el.focus();
     el.click();
-    setInputValue(el, iso);
+    await setInputValue(el, iso);
     await sleep(200);
     // Some pickers want YYYY/MM/DD typed
-    setInputValue(el, iso.replaceAll("-", "/"));
+    await setInputValue(el, iso.replaceAll("-", "/"));
     await sleep(150);
     el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     // close the picker by clicking elsewhere
@@ -696,6 +898,11 @@
       // resolves to in the currently-open drawer (open one manually before
       // running 诊断 to populate this).
       formProbes: probeLabels(form),
+      // Deep DOM dump around every "金额"-ish label in the page. This is the
+      // dispositive diagnostic for "amount won't write" — it shows which
+      // element findInputByLabel landed on, what's actually around the label
+      // in the DOM, and whether our table-skip filter is too aggressive.
+      amountDeepProbe: deepProbeAmount(form),
       // Records the popup is about to send (or just sent). Confirms the
       // chrome message payload carries amount/currency/etc end-to-end.
       pendingRecords: Array.isArray(records) ? records.map((r) => ({
@@ -705,6 +912,104 @@
       })) : null,
       lastFillSummary,
       currentVisibleLabels: collectVisibleLabels(),
+    };
+  }
+
+  function deepProbeAmount(form) {
+    if (!form) {
+      return { error: "no form open — open a 费用 drawer manually then run 诊断 again" };
+    }
+    const labelTexts = LABELS.amount;
+    const allMatching = Array.from(form.querySelectorAll("label, span, div, dt, p, th, strong, em, li, b"))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
+        return labelTexts.some((l) => t === l || t === l + "：" || t === l + ":");
+      });
+    const tableSkipSel = "th, td, tr, thead, tbody, table, [role='columnheader'], [role='rowheader'], [role='cell'], [role='row'], [role='grid'], [role='table']";
+    const probes = allMatching.slice(0, 8).map((lbl, i) => ({
+      idx: i,
+      tag: lbl.tagName.toLowerCase(),
+      cls: (lbl.className || "").toString().slice(0, 200),
+      text: (lbl.textContent || "").trim().slice(0, 40),
+      parentTag: lbl.parentElement?.tagName.toLowerCase(),
+      parentCls: (lbl.parentElement?.className || "").toString().slice(0, 200),
+      grandparentCls: (lbl.parentElement?.parentElement?.className || "").toString().slice(0, 200),
+      excludedByTableFilter: !!lbl.closest(tableSkipSel),
+      excludingAncestor: lbl.closest(tableSkipSel)?.tagName.toLowerCase() || null,
+      outerHtml: lbl.outerHTML.slice(0, 400),
+      // Inputs found by walking from this label
+      siblingInputs: collectNeighborInputs(lbl),
+    }));
+    // Now show what findInputByLabel actually returns
+    const resolved = findInputByLabel(form, labelTexts);
+    // And dump all input-like elements in the form for context
+    const allInputs = Array.from(form.querySelectorAll('input, textarea, [role="combobox"], [role="spinbutton"], [contenteditable="true"]'))
+      .filter(isVisible)
+      .slice(0, 25)
+      .map(describeInputFull);
+    return {
+      labelMatchCount: allMatching.length,
+      probes,
+      resolvedByFindInputByLabel: describeInputFull(resolved),
+      allFormInputs: allInputs,
+    };
+  }
+
+  function collectNeighborInputs(lbl) {
+    const out = [];
+    let cur = lbl;
+    for (let i = 0; i < 4; i++) {
+      cur = cur.nextElementSibling;
+      if (!cur) break;
+      const inps = cur.querySelectorAll
+        ? Array.from(cur.querySelectorAll('input, textarea, [role="combobox"], [role="spinbutton"], [contenteditable="true"]'))
+        : [];
+      for (const el of inps) {
+        if (isVisible(el)) out.push({ via: `nextSibling+${i + 1}`, ...describeInputFull(el) });
+      }
+    }
+    let parent = lbl.parentElement;
+    for (let i = 0; i < 3 && parent; i++) {
+      let sib = parent.nextElementSibling;
+      for (let j = 0; j < 3 && sib; j++) {
+        const inps = sib.querySelectorAll
+          ? Array.from(sib.querySelectorAll('input, textarea, [role="combobox"], [role="spinbutton"], [contenteditable="true"]'))
+          : [];
+        for (const el of inps) {
+          if (isVisible(el)) out.push({ via: `parent^${i + 1}.nextSib+${j + 1}`, ...describeInputFull(el) });
+        }
+        sib = sib.nextElementSibling;
+      }
+      parent = parent.parentElement;
+    }
+    return out.slice(0, 12);
+  }
+
+  function describeInputFull(el) {
+    if (!el) return null;
+    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    // React 16+ stashes props as __reactProps$<random>. Surface which handlers
+    // are present — onChange/onInput/onBlur tell us we can drive the field
+    // via Strategy A (fiber call) regardless of event-dispatch quirks.
+    const reactKey = Object.keys(el).find((s) => s.startsWith("__reactProps$"));
+    const props = reactKey ? el[reactKey] : null;
+    const handlers = props ? Object.keys(props).filter((k) => /^on[A-Z]/.test(k) && typeof props[k] === "function") : [];
+    return {
+      tag: el.tagName.toLowerCase(),
+      type: el.type || null,
+      role: el.getAttribute && el.getAttribute("role"),
+      cls: (el.className || "").toString().slice(0, 200),
+      name: el.name || null,
+      id: el.id || null,
+      ariaLabel: el.getAttribute && el.getAttribute("aria-label"),
+      placeholder: el.placeholder || null,
+      value: ((el.value ?? el.textContent ?? "") + "").slice(0, 60),
+      readonly: !!el.readOnly,
+      disabled: !!el.disabled,
+      hasReactProps: !!props,
+      reactHandlers: handlers,
+      rect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null,
     };
   }
 
