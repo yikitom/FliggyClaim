@@ -235,42 +235,73 @@
   // Strategy: find any element whose text is exactly "金额" (no parent walk
   // restrictions, no table-scope filter) and pick the input visually closest
   // to it on the right or below — the field that LOOKS like the amount cell.
+  // Kuma-specific fast path: look for a label container holding "金额"
+  // (or an asterisk-prefixed variant), find the .field_xxx form-item ancestor,
+  // and grab its `input.kuma-input[type=text]:not([readonly])` — that's the
+  // amount field's actual signature in TAE. Skip variants like "申请金额" /
+  // "报销金额" / "折算金额" / "本位币金额" which are computed/readonly.
+  function findAmountInputByKumaStructure(scope) {
+    const root = scope || document;
+    // 1. Find label elements whose normalized text is exactly "金额".
+    const labelEls = Array.from(root.querySelectorAll('div[class*="label"], span, label, p'))
+      .filter(isVisible)
+      .filter((el) => {
+        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "").replace(/[*：:\s]+$/, "");
+        return t === "金额" || t === "费用金额";
+      });
+    for (const lbl of labelEls) {
+      // 2. Walk up to the nearest Kuma form item — class contains "field_"
+      // (CSS-modules hash). Cap at 4 levels so we stay in the same row.
+      let container = lbl;
+      for (let i = 0; i < 4 && container; i++) {
+        if (container.className && /\bfield_/.test(container.className)) break;
+        container = container.parentElement;
+      }
+      if (!container) continue;
+      // 3. The field's input: kuma-input + type=text, not readonly, NOT the
+      //    select2 internal search field.
+      const candidates = Array.from(container.querySelectorAll('input.kuma-input, input[class*="kuma-input"]'))
+        .filter(isVisible)
+        .filter((inp) => inp.type === "text" && !inp.readOnly)
+        .filter((inp) => !/select2-search|employee-search/.test(inp.className || ""));
+      if (candidates.length) return candidates[0];
+    }
+    return null;
+  }
+
   function findAmountInputByHeuristic(scope) {
     const root = scope || document;
     const labelEls = Array.from(root.querySelectorAll("label, span, div, dt, p, th, em, b, strong"))
       .filter(isVisible)
       .filter((el) => {
-        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
-        return t === "金额" || t === "金额：" || t === "金额:";
+        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "").replace(/[*：:\s]+$/, "");
+        return t === "金额" || t === "费用金额";
       });
     if (!labelEls.length) return null;
     const inputs = Array.from(root.querySelectorAll('input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([disabled]):not([readonly])'))
       .filter(isVisible)
-      // Skip inputs inside the read-only expense table on the left.
       .filter((el) => !isInTableScope(el))
-      // Prefer numeric / placeholder-empty inputs that look like amount fields.
-      ;
+      // Reject Kuma's internal search inputs — they're for filtering dropdown
+      // options, NOT for entering form values.
+      .filter((el) => !/select2-search|employee-search/.test(el.className || ""));
     let best = null;
     let bestScore = -Infinity;
     for (const lbl of labelEls) {
       const lr = lbl.getBoundingClientRect();
       for (const inp of inputs) {
         const ir = inp.getBoundingClientRect();
-        // Same row (vertical overlap) AND input is to the right of the label,
-        // OR input is directly below the label.
         const verticalOverlap = Math.min(lr.bottom, ir.bottom) - Math.max(lr.top, ir.top);
         const horizontalOverlap = Math.min(lr.right, ir.right) - Math.max(lr.left, ir.left);
         const sameRow = verticalOverlap > 5 && ir.left >= lr.right - 4;
         const directlyBelow = ir.top >= lr.bottom - 4 && ir.top - lr.bottom < 30 && horizontalOverlap > 20;
         if (!sameRow && !directlyBelow) continue;
-        // Closer = better. Penalize distance.
         const dist = sameRow
           ? (ir.left - lr.right)
           : (ir.top - lr.bottom + Math.abs((ir.left + ir.right) / 2 - (lr.left + lr.right) / 2));
-        // Bonus for placeholder mentioning 输入 / amount-y attributes.
         let score = -dist;
         if (/请输入|amount|\.|0/.test(inp.placeholder || "")) score += 50;
         if (inp.type === "number") score += 100;
+        if (/kuma-input/.test(inp.className || "")) score += 80;
         if (inp.getAttribute("aria-label") && /金额/.test(inp.getAttribute("aria-label"))) score += 200;
         if (score > bestScore) { bestScore = score; best = inp; }
       }
@@ -493,16 +524,25 @@
     }
 
     // Amount – set after currency, then nudge the form to recompute the
-    // converted (本位币) amount. Verify after each strategy and fall back
-    // to a fresh element lookup + retry if the value was silently dropped
-    // (which happens when currency change re-mounted the InputNumber after
-    // we cached a stale node reference).
+    // converted (本位币) amount.
+    // Make sure ANY open Kuma combobox dropdown collapses first, otherwise
+    // the dropdown's internal `kuma-select2-search__field` is visible inside
+    // the form scope and pickFillable can grab it instead of the real amount
+    // input. Click an inert spot, dispatch escape, and wait a tick.
+    document.body.click();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await sleep(150);
+
     const wantAmt = String(rec.amount ?? 0);
-    let amt = findInputByLabel(form, LABELS.amount);
-    // Last-ditch fallback: if label-anchored lookup returns nothing, find the
-    // input that LOOKS like an amount field — required + numeric placeholder
-    // ("请输入") + sits next to a label whose text contains "金额".
-    if (!amt) amt = findAmountInputByHeuristic(form);
+    // Resolution order matters:
+    // 1. Kuma-specific structural lookup (label "金额" → field_xxx ancestor →
+    //    input.kuma-input[type=text]:not([readonly])). This is dispositive on
+    //    TAE because the amount input has a stable signature.
+    // 2. Generic findInputByLabel (label-anchored sibling walk).
+    // 3. Geometric heuristic (visual same-row / below-label).
+    let amt = findAmountInputByKumaStructure(form)
+      || findInputByLabel(form, LABELS.amount)
+      || findAmountInputByHeuristic(form);
     log("→ amount input:", amt ? describeInput(amt) : "NOT FOUND");
     if (amt) {
       await setInputValue(amt, wantAmt);
@@ -514,7 +554,10 @@
       document.body.click();
       // Verify and retry once with a fresh node lookup if the value vanished.
       await sleep(120);
-      let fresh = findInputByLabel(form, LABELS.amount) || findAmountInputByHeuristic(form) || amt;
+      let fresh = findAmountInputByKumaStructure(form)
+        || findInputByLabel(form, LABELS.amount)
+        || findAmountInputByHeuristic(form)
+        || amt;
       if (parseFloat((fresh.value || "0").toString().replace(/,/g, "")) !== parseFloat(wantAmt)) {
         log("amount didn't stick on first pass; retrying. got:", fresh.value, "want:", wantAmt);
         await setInputValue(fresh, wantAmt);
@@ -678,8 +721,16 @@
 
   function pickFillable(scope) {
     if (!scope || !scope.querySelector) return null;
+    // Exclude:
+    // - hidden / file inputs (not user-fillable)
+    // - checkbox / radio (form metadata, not value fields)
+    // - select2's internal search filter input (kuma-select2-search__field) —
+    //   it's the dropdown's filter box, not a real form field
+    // - employee-search filter input (people picker)
+    const cands = Array.from(scope.querySelectorAll('input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([disabled])'))
+      .filter((el) => !/select2-search|employee-search/.test(el.className || ""));
     return (
-      scope.querySelector('input:not([type="hidden"]):not([type="file"]):not([disabled])') ||
+      cands[0] ||
       scope.querySelector("textarea:not([disabled])") ||
       scope.querySelector("select:not([disabled])") ||
       scope.querySelector('[role="combobox"]') ||
@@ -848,6 +899,14 @@
     if (opt) {
       clickEl(opt);
       await sleep(150);
+      // Force-collapse the dropdown. If we leave it open, its internal
+      // `kuma-select2-search__field` stays visible inside the form and our
+      // next findInputByLabel / pickFillable run can mistake it for the
+      // amount text input. Click body + Esc + blur the search input.
+      try { el.blur(); } catch {}
+      document.body.click();
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await sleep(120);
       return true;
     }
     el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
