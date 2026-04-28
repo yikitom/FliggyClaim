@@ -324,6 +324,14 @@ function renderParsed() {
     });
     cityInp.addEventListener("change", persistParsed);
 
+    // Backfill nights/checkin/checkout for old records persisted before these
+    // fields existed in the schema, otherwise the UI shows "1" but state has
+    // nothing and the import would fall through to a default downstream.
+    if (rec.type === "hotel" && rec.nights == null) {
+      rec.nights = 1;
+      rec.checkin = rec.checkin || rec.date || null;
+      rec.checkout = rec.checkout || addIsoDays(rec.checkin, 1);
+    }
     nightsInp.value = rec.nights || (rec.type === "hotel" ? 1 : "");
     nightsInp.addEventListener("input", () => {
       const n = Math.max(1, parseInt(nightsInp.value, 10) || 1);

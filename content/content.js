@@ -251,10 +251,11 @@
       });
     for (const lbl of labelEls) {
       // 2. Walk up to the nearest Kuma form item — class contains "field_"
-      // (CSS-modules hash). Cap at 4 levels so we stay in the same row.
+      // (CSS-modules hash). Cap at 6 levels — TAE wraps the label in a few
+      // intermediate divs (label_xxx → flex → field_xxx) on some forms.
       let container = lbl;
-      for (let i = 0; i < 4 && container; i++) {
-        if (container.className && /\bfield_/.test(container.className)) break;
+      for (let i = 0; i < 6 && container; i++) {
+        if (container.className && typeof container.className === "string" && /\bfield_/.test(container.className)) break;
         container = container.parentElement;
       }
       if (!container) continue;
@@ -462,8 +463,14 @@
     return Array.from(document.querySelectorAll("a, span, div, li, button, [role=menuitem]"))
       .filter(isVisible)
       .find((el) => {
-        const t = (el.textContent || "").trim();
-        return texts.includes(t) && t.length <= 20 && el.children.length <= 3;
+        const text = (el.textContent || "").trim();
+        const title = (el.getAttribute && el.getAttribute("title") || "").trim();
+        // Match either text content or title attr — Kuma cascade items
+        // sometimes wrap text in custom <icon> elements that swallow the
+        // visible text node, but `title` is set on the <li> itself.
+        return (texts.includes(text) || (title && texts.includes(title)))
+          && (text.length <= 20 || (title && title.length <= 20))
+          && el.children.length <= 3;
       });
   }
 
@@ -534,6 +541,9 @@
     await sleep(150);
 
     const wantAmt = String(rec.amount ?? 0);
+    if (!rec.amount || parseFloat(wantAmt) === 0) {
+      warn(`amount is 0 / missing for record (type=${rec.type}, source=${rec.source}); form will likely reject 保存 — edit the amount in the popup before importing.`);
+    }
     // Resolution order matters:
     // 1. Kuma-specific structural lookup (label "金额" → field_xxx ancestor →
     //    input.kuma-input[type=text]:not([readonly])). This is dispositive on
@@ -893,9 +903,18 @@
       ),
     ).filter(isVisible);
     log("combobox options visible:", opts.length, opts.slice(0, 5).map((o) => (o.textContent || "").trim()));
-    const opt = opts.find((o) =>
-      candidateTexts.some((t) => (o.textContent || "").trim().includes(t)),
-    );
+    // Normalize parens: TAE renders "CNY (人民币）" with a full-width 」）」
+    // closing paren (and sometimes spaces vary). Compare both sides with the
+    // parens stripped so "CNY (人民币)" still matches "CNY (人民币）".
+    const normParens = (s) => (s || "").replace(/[()（）]/g, "").replace(/\s+/g, " ").trim();
+    const opt = opts.find((o) => {
+      const text = (o.textContent || "").trim();
+      const textNorm = normParens(text);
+      return candidateTexts.some((t) => {
+        if (!t) return false;
+        return text.includes(t) || textNorm.includes(normParens(t));
+      });
+    });
     if (opt) {
       clickEl(opt);
       await sleep(150);
