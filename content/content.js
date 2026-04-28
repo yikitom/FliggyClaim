@@ -887,15 +887,35 @@
       el.dispatchEvent(new Event("change", { bubbles: true }));
       return true;
     }
-    el.focus();
+    // findInputByLabel may hand us a Kuma combobox WRAPPER (a <div role=
+    // "combobox">) instead of the inner search field — pickFillable
+    // intentionally excludes `kuma-select2-search__field` for amount-input
+    // safety. Locate the real search input here so we don't try to call
+    // HTMLInputElement.prototype.value's setter on a <div> (that throws
+    // "Illegal invocation").
+    let typingTarget = el;
+    if (el.tagName !== "INPUT" && el.tagName !== "TEXTAREA") {
+      typingTarget = (el.querySelector && el.querySelector('input.kuma-select2-search__field, input[autocomplete="off"], input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])'))
+        || (el.parentElement && el.parentElement.querySelector && el.parentElement.querySelector('input.kuma-select2-search__field'))
+        || el; // last-ditch: fall back to the wrapper itself (subsequent .value assign won't throw, just no-op)
+    }
+    try { el.focus(); } catch {}
     clickEl(el);
     await sleep(150);
-    // Type the first candidate to filter
-    const proto = HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-    if (setter) setter.call(el, candidateTexts[0]);
-    else el.value = candidateTexts[0];
-    el.dispatchEvent(new Event("input", { bubbles: true }));
+    // Type the first candidate to filter — but only if typingTarget is a
+    // real <input>; otherwise just open the dropdown and skip filtering.
+    if (typingTarget && (typingTarget.tagName === "INPUT" || typingTarget.tagName === "TEXTAREA")) {
+      try { typingTarget.focus(); } catch {}
+      const proto = typingTarget.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      try {
+        if (setter) setter.call(typingTarget, candidateTexts[0]);
+        else typingTarget.value = candidateTexts[0];
+      } catch (e) {
+        warn("setComboboxValue: typing into search input failed (will still try option click):", e);
+      }
+      typingTarget.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     await sleep(250);
     const opts = Array.from(
       document.querySelectorAll(
