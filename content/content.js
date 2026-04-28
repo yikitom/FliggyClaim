@@ -185,34 +185,55 @@
   async function attachReceiptFile(form, att, filename, formTitle) {
     try {
       const isHotel = /住宿|酒店/.test(formTitle || "");
-      // Hotel forms have TWO file inputs: 酒店住宿相关凭证★ (required) and 附件
-      // (optional). Always prefer the required slot — uploading to 附件 won't
-      // satisfy the validator and 保存 will fail.
-      let input = isHotel ? findFileInputByLabel(form, LABELS.hotelReceipt) : null;
-      if (!input) input = findFileInputByLabel(form, LABELS.attachment);
-      if (!input) input = findFileInput(form);
-      if (!input) {
-        log("no file input found in form, skipping attachment for", filename);
-        return false;
-      }
-      log(`→ attaching ${filename} to`, isHotel ? "hotelReceipt slot" : "attachment slot", input);
+      // Build the File once; reuse for both slots on hotel.
       const dataUrl = `data:${att.mime || "application/octet-stream"};base64,${att.data}`;
       const blob = await fetch(dataUrl).then((r) => r.blob());
-      const file = new File([blob], filename, { type: att.mime || blob.type });
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      try {
-        input.files = dt.files;
-      } catch {
-        // Fallback for non-standard file inputs.
-        Object.defineProperty(input, "files", { value: dt.files, configurable: true });
+
+      // Upload one file slot, dispatching change/input events. Returns true
+      // if the slot accepted the file.
+      const uploadTo = async (slotInput, slotLabel) => {
+        if (!slotInput) return false;
+        log(`→ attaching ${filename} to`, slotLabel, slotInput);
+        const file = new File([blob], filename, { type: att.mime || blob.type });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        try {
+          slotInput.files = dt.files;
+        } catch {
+          Object.defineProperty(slotInput, "files", { value: dt.files, configurable: true });
+        }
+        slotInput.dispatchEvent(new Event("change", { bubbles: true }));
+        slotInput.dispatchEvent(new Event("input", { bubbles: true }));
+        log(`→ attached ${filename} (${file.size} B) to`, slotLabel);
+        await sleep(1500);
+        return true;
+      };
+
+      let attachedAny = false;
+      if (isHotel) {
+        // Hotel has TWO slots: 酒店住宿相关凭证★ (required, satisfies validator)
+        // AND 附件 (optional, but the expense table's 📎 indicator only
+        // tracks this slot). Fill BOTH so save passes AND the row shows 📎.
+        const receipt = findFileInputByLabel(form, LABELS.hotelReceipt);
+        const attachment = findFileInputByLabel(form, LABELS.attachment);
+        if (receipt && await uploadTo(receipt, "hotelReceipt slot")) attachedAny = true;
+        // Skip the generic 附件 slot if it's the SAME element as hotelReceipt
+        // (some Kuma builds dedupe — only one file input shown).
+        if (attachment && attachment !== receipt) {
+          if (await uploadTo(attachment, "attachment slot")) attachedAny = true;
+        }
+        if (!attachedAny) {
+          // No labeled slot — fall back to the first generic file input.
+          const generic = findFileInput(form);
+          if (generic && await uploadTo(generic, "generic file input")) attachedAny = true;
+        }
+      } else {
+        // Non-hotel forms: only 附件 (optional) — single slot.
+        const slot = findFileInputByLabel(form, LABELS.attachment) || findFileInput(form);
+        if (slot && await uploadTo(slot, "attachment slot")) attachedAny = true;
       }
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      log(`→ attached ${filename} (${file.size} B) to`, input);
-      // Wait briefly for the upload component to register and show progress.
-      await sleep(1500);
-      return true;
+      if (!attachedAny) log("no file input found in form, skipping attachment for", filename);
+      return attachedAny;
     } catch (e) {
       warn("attach failed:", filename, e);
       return false;
@@ -512,7 +533,11 @@
     }
     // 城市 may exist on hotel/meal/taxi/other forms — try unconditionally.
     const cityEl = findInputByLabel(form, LABELS.city);
-    if (cityEl) await setComboboxValue(cityEl, [cityName]);
+    log("→ city input:", cityEl ? describeInput(cityEl) : "NOT FOUND", "want:", cityName);
+    if (cityEl) {
+      const cityOk = await setComboboxValue(cityEl, [cityName]);
+      log("→ city set result:", cityOk);
+    }
 
     if (isTaxi) {
       // 是否网约车 radio – default to 是
@@ -524,10 +549,32 @@
     // when the currency changes (and re-fetches the FX rate against the
     // report's base currency). Filling amount first would be silently wiped.
     const cur = findInputByLabel(form, LABELS.currency);
+    log("→ currency input:", cur ? describeInput(cur) : "NOT FOUND",
+        "want:", rec.currency);
     if (cur) {
-      await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
+      const curOk = await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
+      log("→ currency set result:", curOk);
       // Give TAE time to fire the FX-rate request triggered by the change.
       await sleep(450);
+      // Read back the visible selected currency so we know whether the option
+      // click actually committed. If still showing the form's default, retry.
+      const readSelectedCurrency = () => {
+        const root = cur.closest && cur.closest('[class*="select_"], [class*="kuma-select2"]') || cur;
+        const sel = root.querySelector && root.querySelector('.kuma-select2-selection-selected-value, [class*="selected-value"]');
+        return (sel && sel.textContent || "").trim();
+      };
+      let displayed = readSelectedCurrency();
+      log("→ currency displayed after set:", displayed);
+      if (displayed && !displayed.startsWith(rec.currency)) {
+        log("→ currency didn't take, retrying with fresh wrapper lookup");
+        const cur2 = findInputByLabel(form, LABELS.currency);
+        if (cur2) {
+          const ok2 = await setComboboxValue(cur2, [rec.currency, currencyDisplay(rec.currency)]);
+          log("→ currency retry result:", ok2);
+          await sleep(450);
+          log("→ currency displayed after retry:", readSelectedCurrency());
+        }
+      }
     }
 
     // Amount – set after currency, then nudge the form to recompute the
@@ -535,9 +582,12 @@
     // Make sure ANY open Kuma combobox dropdown collapses first, otherwise
     // the dropdown's internal `kuma-select2-search__field` is visible inside
     // the form scope and pickFillable can grab it instead of the real amount
-    // input. Click an inert spot, dispatch escape, and wait a tick.
+    // input. Just clicking body is enough — DON'T dispatch a document-level
+    // Escape: TAE may surface a "currency change recalculates FX" confirm
+    // dialog after a currency switch, and Escape would cancel it (reverting
+    // the currency back to the report's base). Body-click leaves modals
+    // alone but still collapses the focused dropdown.
     document.body.click();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await sleep(150);
 
     const wantAmt = String(rec.amount ?? 0);
@@ -941,10 +991,12 @@
       // Force-collapse the dropdown. If we leave it open, its internal
       // `kuma-select2-search__field` stays visible inside the form and our
       // next findInputByLabel / pickFillable run can mistake it for the
-      // amount text input. Click body + Esc + blur the search input.
-      try { el.blur(); } catch {}
+      // amount text input. Blur + body click is enough; deliberately do NOT
+      // dispatch a document-level Escape — that would cancel a "currency
+      // changed, recompute FX?" confirm modal if TAE shows one.
+      try { (typingTarget || el).blur && (typingTarget || el).blur(); } catch {}
+      try { el.blur && el.blur(); } catch {}
       document.body.click();
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       await sleep(120);
       return true;
     }
