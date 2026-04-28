@@ -913,17 +913,113 @@
     if (!el || !iso) return false;
     if (el.type === "date") return await setInputValue(el, iso);
 
-    el.focus();
-    el.click();
-    await setInputValue(el, iso);
-    await sleep(200);
-    // Some pickers want YYYY/MM/DD typed
-    await setInputValue(el, iso.replaceAll("-", "/"));
-    await sleep(150);
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    // close the picker by clicking elsewhere
-    document.body.click();
-    return true;
+    // Kuma's calendar input is readonly — typing into it is a no-op (the
+    // input value gets set in DOM but readOnly blocks the picker's onChange
+    // and the next render reverts to whatever moment the picker holds in
+    // state). The reliable path is: open the popup → navigate to the target
+    // month → click the day cell.
+    log("→ setting date", iso, "on", describeInput(el));
+
+    // 1. Open the calendar popup. Kuma binds the trigger handler to the
+    //    `<i class="kuma-calendar-trigger-icon">` icon (and/or the wrapper
+    //    `<span class="kuma-calendar-picker-input">`); the readonly input
+    //    itself only opens on focus on some builds.
+    const wrapper = (el.closest && el.closest('.kuma-calendar-picker-input, .kuma-calendar-picker-wrap, [class*="calendar-picker"]')) || el.parentElement;
+    const trigger = (wrapper && wrapper.querySelector && wrapper.querySelector('.kuma-calendar-trigger-icon, [class*="trigger-icon"], [class*="calendar-icon"], i[class*="riqi"]')) || el;
+    try { el.focus(); } catch {}
+    clickEl(trigger);
+    await sleep(300);
+
+    // 2. Find the visible calendar panel (Kuma renders it via portal at
+    //    document level; multiple may exist in DOM, take the visible one).
+    const findPanel = () => {
+      const panels = Array.from(document.querySelectorAll(
+        '.kuma-calendar-panel, .kuma-calendar, [class*="calendar-panel"], [class*="calendar-popup"], [class*="DatePickerPanel"]'
+      )).filter(isVisible);
+      return panels.length ? panels[panels.length - 1] : null;
+    };
+    let panel = findPanel();
+    if (!panel) {
+      // Some builds need clicking the input itself to open.
+      clickEl(el);
+      await sleep(300);
+      panel = findPanel();
+    }
+    if (!panel) {
+      log("date picker did not open for", iso);
+      return false;
+    }
+    log("→ date picker opened", panel);
+
+    // 3. Parse target date and navigate to its month.
+    const m = iso.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (!m) {
+      log("invalid iso date", iso);
+      return false;
+    }
+    const year = +m[1], month = +m[2], day = +m[3];
+    const targetTotal = year * 12 + month;
+
+    for (let i = 0; i < 36; i++) {
+      // Read the panel's current month/year header. Kuma's header shows
+      // "2026年4月" or "Apr 2026" depending on locale.
+      const headerEls = Array.from(panel.querySelectorAll(
+        '[class*="month-select"], [class*="MonthSelect"], [class*="year-select"], [class*="header"], [class*="my-select"]'
+      ));
+      const headerText = headerEls.map((h) => (h.textContent || "").trim()).join(" ")
+        || (panel.textContent || "").slice(0, 40);
+      const ymMatch = headerText.match(/(\d{4})[^\d]+(\d{1,2})/);
+      if (!ymMatch) { log("→ can't parse calendar header:", headerText); break; }
+      const currYear = +ymMatch[1], currMonth = +ymMatch[2];
+      const currTotal = currYear * 12 + currMonth;
+      if (currTotal === targetTotal) break;
+
+      const direction = currTotal < targetTotal ? "next" : "prev";
+      const navBtn = panel.querySelector(direction === "next"
+        ? '[class*="next-month"], [class*="NextMonth"], [class*="next-btn"], [aria-label*="ext"]'
+        : '[class*="prev-month"], [class*="PrevMonth"], [class*="prev-btn"], [aria-label*="rev"]'
+      );
+      if (!navBtn) { log("→ no", direction, "month nav button found"); break; }
+      clickEl(navBtn);
+      await sleep(140);
+    }
+
+    // 4. Click the day cell.
+    const dayCells = Array.from(panel.querySelectorAll(
+      'td, [role="gridcell"], [class*="calendar-cell"], [class*="day-cell"]'
+    )).filter(isVisible);
+
+    // Try matching by title / aria-label (Kuma puts ISO date there).
+    let dayCell = dayCells.find((c) => {
+      const title = c.getAttribute && c.getAttribute("title") || "";
+      const aria = c.getAttribute && c.getAttribute("aria-label") || "";
+      return title.includes(iso) || aria.includes(iso)
+          || title.includes(`${year}年${month}月${day}日`)
+          || aria.includes(`${year}年${month}月${day}日`);
+    });
+
+    // Fallback: match by visible day number, skip cells in adjacent months
+    // or disabled cells.
+    if (!dayCell) {
+      dayCell = dayCells.find((c) => {
+        const cls = ((c.className || "") + "").toString();
+        if (/(prev|next|last|other).*month|disabled/i.test(cls)) return false;
+        const text = (c.textContent || "").trim();
+        return text === String(day);
+      });
+    }
+
+    if (dayCell) {
+      log("→ clicking day cell", iso, dayCell);
+      clickEl(dayCell);
+      await sleep(200);
+      // Close the picker (Kuma usually auto-closes on selection, but be safe).
+      document.body.click();
+      return true;
+    }
+
+    log("→ could not find day cell for", iso, "in calendar panel");
+    return false;
   }
 
   async function setComboboxValue(el, candidateTexts) {
