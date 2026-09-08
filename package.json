@@ -1,0 +1,14 @@
+{
+  "name": "fliggyclaim",
+  "private": true,
+  "description": "FliggyClaim 报销助手 — Chrome MV3 extension. This package.json only exists to expose the test/build scripts; the extension itself has no npm dependencies (pdf.js / tesseract.js are vendored under lib/).",
+  "scripts": {
+    "test": "node tests/run.js",
+    "test:unit": "node tests/run.js parser",
+    "test:e2e": "node tests/run.js content && node tests/run.js dom && node tests/run.js popup",
+    "build": "bash scripts/build.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
