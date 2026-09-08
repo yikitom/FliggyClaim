@@ -200,10 +200,10 @@ async function parseAll() {
   for (const f of files) {
     try {
       const rec = await FliggyParser.parseFile(f);
-      newRecords.push(rec);
+      newRecords.push(FliggyParser.normalizeRecord(rec));
     } catch (err) {
       console.error("parse error", f.name, err);
-      newRecords.push(FliggyParser.fallbackRecord(f, err?.message));
+      newRecords.push(FliggyParser.normalizeRecord(FliggyParser.fallbackRecord(f, err?.message)));
     }
     done++;
     label.textContent = `${done} / ${total}`;
@@ -235,10 +235,24 @@ function bindParsedActions() {
 async function restoreParsed() {
   try {
     const data = await chrome.storage.local.get(STORAGE_KEY_PARSED);
-    state.records = data[STORAGE_KEY_PARSED] || [];
+    // Normalize on load: migrates records persisted by older versions (no
+    // city / nights / checkin / checkout) and enforces the schema invariants.
+    state.records = (data[STORAGE_KEY_PARSED] || []).map((r) => FliggyParser.normalizeRecord(r));
   } catch (e) {
     state.records = [];
   }
+}
+
+// What we actually send to the content script: normalized, city filled in
+// from note/source if the user left it blank (it's required on hotel), and
+// without the parser's `_debug` blob.
+function toFillPayload(records) {
+  return records.map((r) => {
+    const n = FliggyParser.normalizeRecord(r);
+    const { _debug, ...rest } = n;
+    rest.city = rest.city || FliggyParser.extractCity(`${rest.note} ${rest.source}`) || null;
+    return rest;
+  });
 }
 
 async function persistParsed() {
@@ -281,92 +295,51 @@ function renderParsed() {
       secondRow.classList.toggle("with-nights", isHotel);
     };
 
+    // Single mutation path: merge the patch, re-normalize (hotel invariants:
+    // checkin = date, checkout = checkin + nights; non-hotel nulls them),
+    // optionally persist. Typing events skip persistence; change events persist.
+    const mutate = (patch, persist = true) => {
+      state.records[idx] = FliggyParser.normalizeRecord({ ...state.records[idx], ...patch });
+      if (persist) persistParsed();
+      return state.records[idx];
+    };
+
     const typeSel = node.querySelector(".type");
     typeSel.value = rec.type || "other";
     applyTypeUI(typeSel.value);
     typeSel.addEventListener("change", () => {
-      const t = typeSel.value;
-      state.records[idx].type = t;
-      // Sync nights for hotel <-> non-hotel transitions.
-      if (t === "hotel") {
-        state.records[idx].nights = state.records[idx].nights || 1;
-        state.records[idx].checkin = state.records[idx].date || null;
-        state.records[idx].checkout = addIsoDays(state.records[idx].date, state.records[idx].nights);
-        nightsInp.value = state.records[idx].nights;
-      } else {
-        state.records[idx].nights = null;
-        state.records[idx].checkin = null;
-        state.records[idx].checkout = null;
-      }
-      applyTypeUI(t);
-      persistParsed();
+      const r = mutate({ type: typeSel.value });
+      nightsInp.value = r.nights ?? "";
+      applyTypeUI(r.type);
     });
 
     const dateInp = node.querySelector(".date");
     dateInp.value = rec.date || "";
-    dateInp.addEventListener("change", () => {
-      state.records[idx].date = dateInp.value;
-      // Hotel checkin tracks the date; recompute checkout from nights.
-      if (state.records[idx].type === "hotel") {
-        state.records[idx].checkin = dateInp.value;
-        state.records[idx].checkout = addIsoDays(
-          dateInp.value,
-          state.records[idx].nights || 1,
-        );
-      }
-      persistParsed();
-    });
+    dateInp.addEventListener("change", () => mutate({ date: dateInp.value }));
 
     const cityInp = node.querySelector(".city");
     cityInp.value = rec.city || "";
-    cityInp.addEventListener("input", () => {
-      state.records[idx].city = cityInp.value.trim() || null;
-    });
-    cityInp.addEventListener("change", persistParsed);
+    cityInp.addEventListener("input", () => mutate({ city: cityInp.value }, false));
+    cityInp.addEventListener("change", () => mutate({ city: cityInp.value }));
 
-    // Backfill nights/checkin/checkout for old records persisted before these
-    // fields existed in the schema, otherwise the UI shows "1" but state has
-    // nothing and the import would fall through to a default downstream.
-    if (rec.type === "hotel" && rec.nights == null) {
-      rec.nights = 1;
-      rec.checkin = rec.checkin || rec.date || null;
-      rec.checkout = rec.checkout || addIsoDays(rec.checkin, 1);
-    }
-    nightsInp.value = rec.nights || (rec.type === "hotel" ? 1 : "");
-    nightsInp.addEventListener("input", () => {
-      const n = Math.max(1, parseInt(nightsInp.value, 10) || 1);
-      state.records[idx].nights = n;
-      if (state.records[idx].type === "hotel") {
-        state.records[idx].checkout = addIsoDays(
-          state.records[idx].checkin || state.records[idx].date,
-          n,
-        );
-      }
-    });
-    nightsInp.addEventListener("change", persistParsed);
+    nightsInp.value = rec.nights ?? "";
+    nightsInp.addEventListener("input", () => mutate({ nights: nightsInp.value }, false));
+    nightsInp.addEventListener("change", () => mutate({ nights: nightsInp.value }));
 
     const curSel = node.querySelector(".currency");
+    curSel.innerHTML = FliggyParser.CURRENCIES.map((c) => `<option value="${c.code}">${c.code}</option>`).join("");
     curSel.value = rec.currency || "CNY";
-    curSel.addEventListener("change", () => {
-      state.records[idx].currency = curSel.value;
-      persistParsed();
-      updateTotals();
-    });
+    curSel.addEventListener("change", () => { mutate({ currency: curSel.value }); updateTotals(); });
 
     const amtInp = node.querySelector(".amount");
     amtInp.value = rec.amount ?? "";
-    amtInp.addEventListener("input", () => {
-      state.records[idx].amount = parseFloat(amtInp.value) || 0;
-      updateTotals();
-    });
-    amtInp.addEventListener("change", persistParsed);
+    amtInp.addEventListener("input", () => { mutate({ amount: amtInp.value }, false); updateTotals(); });
+    amtInp.addEventListener("change", () => mutate({ amount: amtInp.value }));
 
     const noteInp = node.querySelector(".note");
     noteInp.value = (rec.note || "").slice(0, 20);
-    noteInp.addEventListener("input", () => {
-      state.records[idx].note = noteInp.value.slice(0, 20);
-    });
-    noteInp.addEventListener("change", persistParsed);
+    noteInp.addEventListener("input", () => mutate({ note: noteInp.value }, false));
+    noteInp.addEventListener("change", () => mutate({ note: noteInp.value }));
 
     const src = node.querySelector(".src-name");
     src.textContent = rec.source || "";
@@ -466,15 +439,16 @@ async function importToSystem() {
   if (state.records.length === 0) return;
   try {
     await withTab(async (tab) => {
-      const attachments = await buildAttachmentsMap(state.records);
+      const records = toFillPayload(state.records);
+      const attachments = await buildAttachmentsMap(records);
       const attCount = Object.keys(attachments).length;
       console.log("[FliggyClaim] sending FLIGGY_FILL to tab", tab.id, tab.url, {
-        records: state.records.length,
+        records: records.length,
         attachments: attCount,
       });
       const resp = await chrome.tabs.sendMessage(tab.id, {
         type: "FLIGGY_FILL",
-        records: state.records,
+        records,
         attachments,
       });
       console.log("[FliggyClaim] FLIGGY_FILL response:", resp);
@@ -551,7 +525,7 @@ async function runDiagnostics() {
     await withTab(async (tab) => {
       const resp = await chrome.tabs.sendMessage(tab.id, {
         type: "FLIGGY_DIAG",
-        records: state.records,
+        records: toFillPayload(state.records),
       });
       console.log("[FliggyClaim] diagnostic response:", resp);
       if (resp && resp.ok) {
@@ -573,14 +547,6 @@ async function runDiagnostics() {
 }
 
 /* ---------- Settings ---------- */
-function addIsoDays(iso, days) {
-  if (!iso) return iso;
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  d.setDate(d.getDate() + (days || 0));
-  return d.toISOString().slice(0, 10);
-}
-
 function bindSettings() {
   $("#settingsBtn").addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
