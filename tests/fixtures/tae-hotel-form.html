@@ -1,0 +1,601 @@
+<!doctype html>
+<!--
+  Fixture: a miniature TAE 报销单 page.
+
+  Reconstructed from the DevTools DOM dump captured on the real page
+  (2026-04-26). Class names are the real CSS-modules hashes seen in production
+  (field_PlvYD / label_3OUma / box_2Yds_ / content_2mYN3 / numberInputWrapper_cWTb2
+  / kuma-* / uxcore-*). Only the structure content.js selectors care about is
+  reproduced; presentation is approximated with inline CSS so every element
+  passes isVisible() (non-zero rect, display != none) under real Chromium
+  layout.
+
+  It is a small STATE MACHINE mirroring the real flow, so content.js can be
+  driven end-to-end through its public message API:
+
+      closed ──新增费用──▶ picker ──click <li title="差旅-X">──▶ form(X)
+      form(X) ──保存 (required fields OK)──▶ closed + a new table row
+      form(X) ──保存 (missing required)──▶ stays open, shows error
+      form(X) ──取消──▶ closed
+
+  Traps deliberately present, mirroring production:
+    • Left expense TABLE has a "金额" column header and "差旅-住宿" cells —
+      both must NOT be picked up as form labels / form titles.
+    • First form item is the 有收据/无收据 radio whose hidden state lives in an
+      <input type="checkbox" class="kuma-checkbox"> — must NOT be the amount.
+    • Every Kuma combobox contains an <input class="kuma-select2-search__field">
+      (dropdown filter box) — must NOT be treated as a form field.
+    • Date inputs are READONLY with a trigger icon; typing is a no-op.
+    • Hotel has TWO file inputs (酒店住宿相关凭证★ and 附件).
+    • The picker <li> wraps its text in a custom <icon> like production.
+
+  Test hooks (window.__fixture):
+    state            'closed' | 'picker' | 'hotel' | 'meal'
+    openForm(type)   jump straight to a form (for finder unit tests)
+    reset()          back to 'closed'
+    saved[]          array of {type, ...captured field values} per successful 保存
+    rejected[]       array of {type, missing:[...]} per rejected 保存
+    calendarOpens    how many times a date picker popup was opened
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>泰国团队绩效 | AIS商务谈判 | 当地旅行社拜访 - 出行报销单</title>
+<style>
+  body { margin: 0; font: 14px/1.4 sans-serif; }
+  .content_3-5bv { display: flex; }
+  .master_1qSRP { width: 880px; padding: 16px; }
+  .spliter_3Ng16 { width: 8px; }
+  .detail_1KqLf { width: 506.9px; padding: 16px; border-left: 1px solid #eee; }
+  .hidden { display: none !important; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #eee; }
+  .head_10iVC { display: flex; justify-content: space-between; margin-bottom: 12px; }
+  .form_D3dym { display: block; }
+  .field_PlvYD { display: flex; align-items: flex-start; margin-bottom: 18px; }
+  .label_3OUma { width: 110px; text-align: right; padding-right: 12px; }
+  .required_3ncpN .label_3OUma::before { content: "* "; color: #f5222d; }
+  .box_2Yds_ { flex: 1; }
+  .content_2mYN3 { display: block; }
+  input.kuma-input, textarea.kuma-textarea { width: 100%; height: 36px; padding: 0 10px; border: 1px solid #d9d9d9; box-sizing: border-box; }
+  textarea.kuma-textarea { height: 36px; resize: none; }
+  .kuma-select2 { position: relative; }
+  .kuma-select2-selection { display: block; height: 36px; border: 1px solid #d9d9d9; padding: 0 10px; box-sizing: border-box; line-height: 34px; }
+  .kuma-select2-selection__placeholder { color: #bbb; }
+  .kuma-select2-search--inline { display: none; }
+  .kuma-select2-search--inline.is-open { display: block; }
+  .kuma-select2-search__field { width: 100%; height: 30px; }
+  .kuma-select2-arrow { position: absolute; right: 8px; top: 10px; }
+  .kuma-calendar-picker-input { position: relative; display: block; }
+  .kuma-calendar-trigger-icon { position: absolute; right: 8px; top: 10px; width: 16px; height: 16px; display: inline-block; background: #ddd; }
+  .numberInputWrapper_cWTb2 { display: flex; }
+  .kuma-checkbox { position: absolute; opacity: 0; width: 0; height: 0; }
+  .radio_2dhs9 label { display: inline-block; margin-right: 16px; padding: 4px 12px; border: 1px solid #d9d9d9; }
+  .buttons_1XdQw { display: flex; margin-top: 24px; }
+  .buttons-box_3Zb06 { display: flex; }
+  .kuma-button { height: 32px; padding: 0 16px; margin-right: 8px; }
+  .upload-link_3XFgK { display: inline-block; padding: 6px 12px; border: 1px solid #d9d9d9; }
+  .file-list_3t5H9 { min-height: 4px; }
+  .attachment-placeholder_3e8SO { display: inline-block; }
+  .save-error { color: #f5222d; margin-left: 12px; line-height: 32px; }
+  /* picker */
+  .picker-drawer { width: 506.9px; padding: 16px; border-left: 1px solid #eee; }
+  .picker-cols { display: flex; }
+  .picker-left { width: 140px; }
+  .picker-left li, .picker-right li { list-style: none; padding: 8px 12px; cursor: pointer; }
+  .picker-right ul { padding: 0; margin: 0; }
+  /* calendar popup (portal) */
+  .kuma-calendar-panel { display: none; }
+  .kuma-calendar-panel.is-open { display: block; position: absolute; left: 1000px; top: 200px; background: #fff; border: 1px solid #ccc; padding: 8px; z-index: 100; }
+  .kuma-calendar-panel td { width: 32px; height: 28px; text-align: center; cursor: pointer; }
+  .kuma-calendar-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div class="content_3-5bv">
+
+  <!-- ======================= LEFT: expense list ======================= -->
+  <div class="master_1qSRP">
+    <div class="head_10iVC">
+      <div>
+        <button type="button" class="kuma-button kuma-button-primary" data-breaking="true" id="addExpenseBtn">新增费用</button>
+        <span>AI智能推荐 ✦ | 从消费记录中选取 | 导入打车行程单 | 手机扫描发票 | 复制历史报销单</span>
+      </div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th><input type="checkbox"></th>
+          <th>序号</th>
+          <th>日期</th>
+          <th>费用详情</th>
+          <th>费用类型</th>
+          <th>金额</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="expenseRows">
+        <tr>
+          <td><input type="checkbox"></td>
+          <td>1</td>
+          <td></td>
+          <td>旧的记录</td>
+          <td>差旅-住宿</td>
+          <td>0.00 CNY<br><span>0.00 SGD</span></td>
+          <td><a>复制</a> <a>删除</a></td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="padding:12px 0">公司支付</div>
+    <div style="padding:12px 0;color:#999">本次出行没有公司支付费用款项</div>
+    <div style="padding:12px 0">报销总金额 <b>0.00 SGD</b>
+      <button type="button" class="kuma-button">删除报销单</button>
+      <button type="button" class="kuma-button">修改报销单</button>
+      <button type="button" class="kuma-button kuma-button-primary">提交报销单</button>
+    </div>
+  </div>
+
+  <div class="spliter_3Ng16"></div>
+
+  <!-- ======================= RIGHT (a): category PICKER drawer ======================= -->
+  <div class="picker-drawer hidden" id="pickerDrawer">
+    <div class="head_10iVC"><div><span>选择费用类型</span></div><div><a id="pickerCancel">取消</a></div></div>
+    <div class="picker-cols">
+      <ul class="picker-left">
+        <li>常用</li>
+        <li>差旅</li>
+        <li>招待</li>
+      </ul>
+      <div class="picker-right">
+        <ul>
+          <li title="差旅-机票"><div class="cascade-item_c1ck5"><icon class="uxcore-icon uxicon-yiwen-full icon_2F4nj tip_1L-pv"></icon>差旅-机票</div></li>
+          <li title="差旅-住宿"><div class="cascade-item_c1ck5"><icon class="uxcore-icon uxicon-yiwen-full icon_2F4nj tip_1L-pv"></icon>差旅-住宿</div></li>
+          <li title="差旅-餐费"><div class="cascade-item_c1ck5"><icon class="uxcore-icon uxicon-yiwen-full icon_2F4nj tip_1L-pv"></icon>差旅-餐费</div></li>
+          <li title="差旅-打车"><div class="cascade-item_c1ck5"><icon class="uxcore-icon uxicon-yiwen-full icon_2F4nj tip_1L-pv"></icon>差旅-打车</div></li>
+          <li title="差旅-火车"><div class="cascade-item_c1ck5"><icon class="uxcore-icon uxicon-yiwen-full icon_2F4nj tip_1L-pv"></icon>差旅-火车</div></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= RIGHT (b): category FORM drawer ======================= -->
+  <div class="detail_1KqLf hidden" id="formDrawer">
+    <div class="box_34vL- details_busmF">
+      <div class="head_10iVC">
+        <div><span id="formTitle">差旅-住宿</span></div>
+        <div><a>修改费用类型</a> <a>财务信息</a></div>
+      </div>
+      <div class="content_3HM_U">
+        <div>
+          <div class="form_D3dym fluid_D6uvy" id="formBody"><!-- rendered by JS --></div>
+          <div class="buttons_1XdQw">
+            <div class="buttons-box_3Zb06">
+              <!-- decoy: must never be treated as the form's 保存 -->
+              <button type="button" class="kuma-button kuma-button-secondary" id="saveDraftBtn">保存草稿</button>
+              <button type="button" class="kuma-button kuma-button-primary with-aux_XroAO" id="saveBtn">保存</button>
+              <button type="button" class="kuma-button kuma-button-primary aux_1zE0p">▾</button>
+              <button type="button" class="kuma-button kuma-button-secondary" id="cancelBtn">取消</button>
+              <span class="save-error hidden" id="saveError"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /content_3-5bv -->
+
+<!-- Portal-rendered calendar popup -->
+<div class="kuma-calendar-panel" id="calendarPanel">
+  <div class="kuma-calendar-header">
+    <a class="kuma-calendar-prev-month-btn" id="calPrev">‹</a>
+    <span class="kuma-calendar-my-select" id="calHeader">2026年4月</span>
+    <a class="kuma-calendar-next-month-btn" id="calNext">›</a>
+  </div>
+  <table class="kuma-calendar-table"><tbody id="calendarBody"></tbody></table>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (s, r) => (r || document).querySelector(s);
+  const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+
+  const F = window.__fixture = {
+    state: "closed",
+    saved: [],
+    rejected: [],
+    calendarOpens: 0,
+    openForm(type) { showForm(type); },
+    reset() { setState("closed"); },
+  };
+
+  /* ---------------- templates ---------------- */
+  const tpl = {
+    radio: () => `
+      <div class="radio_2dhs9 field_PlvYD required_3ncpN">
+        <div class="box_2Yds_" style="margin-left:122px">
+          <label><input type="checkbox" class="kuma-checkbox" value="on" checked>有收据</label>
+          <label>无收据</label>
+        </div>
+      </div>`,
+    select: (label, key, required, placeholder, preselected) => `
+      <div class="field_PlvYD${required ? " required_3ncpN" : ""}">
+        <div class="label_3OUma" style="padding-top: 9px;">${label}</div>
+        <div class="box_2Yds_"><div class="content_2mYN3">
+          <div class="select_hfqDF kuma-select2-large kuma-select2 kuma-select2-enabled" data-key="${key}">
+            <div class="kuma-select2-selection kuma-select2-selection--single" role="combobox" aria-autocomplete="list" aria-haspopup="true" aria-expanded="false" tabindex="0">
+              <div class="kuma-select2-selection__rendered">
+                <div unselectable="on" class="kuma-select2-selection__placeholder"${preselected ? ' style="display:none"' : ""}>${placeholder}</div>
+                ${preselected ? `<div class="kuma-select2-selection-selected-value" title="${preselected}">${preselected}</div>` : ""}
+                <div class="kuma-select2-search kuma-select2-search--inline">
+                  <div class="kuma-select2-search__field__wrap">
+                    <input autocomplete="off" class="kuma-select2-search__field" value="">
+                    <span class="kuma-select2-search__field__mirror"></span>
+                  </div>
+                </div>
+              </div>
+              <span class="kuma-select2-arrow" unselectable="on">▾</span>
+            </div>
+          </div>
+        </div></div>
+      </div>`,
+    employee: (label, key, required, preselected) => `
+      <div class="field_PlvYD${required ? " required_3ncpN" : ""}">
+        <div class="label_3OUma" style="padding-top: 9px;">${label}</div>
+        <div class="box_2Yds_"><div class="content_2mYN3"><div class="people_2ITS4">
+          <div class="kuma-employee-search kuma-select2-large kuma-select2 kuma-select2-enabled" data-key="${key}">
+            <div class="kuma-select2-selection kuma-select2-selection--${preselected ? "single" : "multiple"}" role="combobox" aria-autocomplete="list" aria-haspopup="true" aria-expanded="false">
+              <div class="kuma-select2-selection__rendered">
+                <div unselectable="on" class="kuma-select2-selection__placeholder"${preselected ? ' style="display:none"' : ""}>输入姓名/花名/工号搜索</div>
+                ${preselected ? `<div class="kuma-select2-selection-selected-value" title="${preselected}">${preselected}</div>` : ""}
+                <ul><li class="kuma-select2-search kuma-select2-search--inline">
+                  <div class="kuma-select2-search__field__wrap">
+                    <input autocomplete="off" class="kuma-select2-search__field" value="">
+                    <span class="kuma-select2-search__field__mirror"></span>
+                  </div>
+                </li></ul>
+              </div>
+            </div>
+          </div>
+          <div class="people-counter_1lCKQ">${preselected ? 1 : 0}</div>
+        </div></div></div>
+      </div>`,
+    date: (label, key, required) => `
+      <div class="field_PlvYD${required ? " required_3ncpN" : ""}">
+        <div class="label_3OUma" style="padding-top: 9px;">${label}</div>
+        <div class="box_2Yds_"><div class="content_2mYN3">
+          <span class="kuma-calendar-picker-input" data-key="${key}">
+            <input readonly placeholder="请选择" class="kuma-input" value="">
+            <i class="uxcore-icon uxicon-riqi kuma-calendar-trigger-icon "></i>
+          </span>
+        </div></div>
+      </div>`,
+    file: (label, key, required, hint) => `
+      <div class="field_PlvYD${required ? " required_3ncpN" : ""}">
+        <div class="label_3OUma" style="padding-top: 9px;">${label}</div>
+        <div class="box_2Yds_"><div class="content_2mYN3">
+          <div>
+            <span class="attachment-placeholder_3e8SO"></span>
+            <span class="upload-component_1BMS9">
+              <span class="upload-link-container_GV8IB">
+                <span class="upload-link_3XFgK">添加文件</span>
+                <input type="file" multiple accept="doc,docx,xls,xlsx,pdf,rar,zip,txt,jpg,jpeg,png,gif,eml,msg,ofd,xml" style="display: none;" data-key="${key}">
+              </span>
+              <div class="file-list_3t5H9"></div>
+            </span>
+          </div>
+          ${hint ? `<div style="color:#999;font-size:12px">${hint}</div>` : ""}
+        </div></div>
+      </div>`,
+    amount: () => `
+      <div class="field_PlvYD required_3ncpN">
+        <div class="label_3OUma" style="padding-top: 9px;">金额</div>
+        <div class="box_2Yds_"><div class="content_2mYN3">
+          <span class="numberInputWrapper_cWTb2">
+            <input class="kuma-input" type="text" placeholder="请输入" value="" data-key="amount">
+          </span>
+        </div></div>
+      </div>`,
+    readonlyText: (label, key, value, unit) => `
+      <div class="field_PlvYD">
+        <div class="label_3OUma" style="padding-top: 9px;">${label}</div>
+        <div class="box_2Yds_"><div class="content_2mYN3" style="display:flex">
+          <input class="kuma-input" type="text" readonly value="${value}" data-key="${key}">
+          ${unit ? `<span style="padding:0 8px;line-height:36px">${unit}</span>` : ""}
+        </div></div>
+      </div>`,
+    textarea: (label, key) => `
+      <div class="field_PlvYD">
+        <div class="label_3OUma" style="padding-top: 9px;">${label}</div>
+        <div class="box_2Yds_"><div class="content_2mYN3"><div class="text_3-6R7">
+          <textarea class="kuma-textarea" placeholder="请输入" maxlength="100" data-key="${key}"></textarea>
+          <div class="text-shadow_19SQk"></div>
+        </div></div></div>
+      </div>`,
+    radioYesNo: (label, key) => `
+      <div class="field_PlvYD required_3ncpN">
+        <div class="label_3OUma" style="padding-top: 9px;">${label}</div>
+        <div class="box_2Yds_"><div class="content_2mYN3" data-key="${key}">
+          <label><input type="radio" name="${key}" value="是"><span>是</span></label>
+          <label><input type="radio" name="${key}" value="否"><span>否</span></label>
+        </div></div>
+      </div>`,
+  };
+
+  const FORMS = {
+    hotel: () => [
+      tpl.radio(),
+      tpl.select("费用发生城市", "city", true, "请选择"),
+      tpl.date("入住时间", "checkin", true),
+      tpl.date("离店时间", "checkout", true),
+      tpl.employee("公司内合住人", "roommate", false),
+      tpl.file("酒店住宿相关凭证", "receipt", true, "请上传住宿发票对应的水单"),
+      tpl.amount(),
+      tpl.select("币种", "currency", true, "请选择", "SGD (新加坡元）"),
+      tpl.readonlyText("汇率", "rate", ""),
+      tpl.readonlyText("报销金额", "converted", "0", "SGD"),
+      tpl.textarea("详细说明", "note"),
+      tpl.employee("住宿人", "guest", true, "Zhou, Xiaochen"),
+      tpl.file("附件", "attachment", false),
+    ].join(""),
+    meal: () => [
+      tpl.radio(),
+      tpl.date("费用发生时间", "date", false),
+      tpl.employee("公司合餐人", "diners", false),
+      tpl.amount(),
+      tpl.select("币种", "currency", true, "请选择", "SGD (新加坡元）"),
+      tpl.textarea("详细说明", "note"),
+      tpl.file("附件", "attachment", false),
+    ].join(""),
+    taxi: () => [
+      tpl.radio(),
+      tpl.date("费用发生时间", "date", false),
+      tpl.radioYesNo("是否网约车", "rideshare"),
+      tpl.amount(),
+      tpl.select("币种", "currency", true, "请选择", "SGD (新加坡元）"),
+      tpl.textarea("详细说明", "note"),
+      tpl.file("附件", "attachment", false),
+    ].join(""),
+    flight: () => [
+      tpl.radio(),
+      tpl.date("费用发生时间", "date", false),
+      tpl.date("乘机日期", "flightDate", true),
+      tpl.amount(),
+      tpl.select("币种", "currency", true, "请选择", "SGD (新加坡元）"),
+      tpl.textarea("详细说明", "note"),
+      tpl.file("附件", "attachment", false),
+    ].join(""),
+    train: () => [
+      tpl.radio(),
+      tpl.date("费用发生时间", "date", false),
+      tpl.amount(),
+      tpl.select("币种", "currency", true, "请选择", "SGD (新加坡元）"),
+      tpl.textarea("详细说明", "note"),
+      tpl.file("附件", "attachment", false),
+    ].join(""),
+  };
+  const TITLE = { hotel: "差旅-住宿", meal: "差旅-餐费", taxi: "差旅-打车", flight: "差旅-机票", train: "差旅-火车" };
+  const LEAF_TO_TYPE = Object.fromEntries(Object.entries(TITLE).map(([k, v]) => [v, k]));
+
+  /* ---------------- state machine ---------------- */
+  function setState(s) {
+    F.state = s;
+    $("#pickerDrawer").classList.toggle("hidden", s !== "picker");
+    $("#formDrawer").classList.toggle("hidden", !(s in FORMS));
+    if (!(s in FORMS)) { $("#formBody").innerHTML = ""; $("#saveError").classList.add("hidden"); }
+    closeAllDropdowns();
+    $("#calendarPanel").classList.remove("is-open");
+  }
+  function showForm(type) {
+    $("#formTitle").textContent = TITLE[type];
+    $("#formBody").innerHTML = FORMS[type]();
+    wireForm();
+    setState(type);
+  }
+
+  $("#addExpenseBtn").addEventListener("click", () => setState("picker"));
+  $("#pickerCancel").addEventListener("click", () => setState("closed"));
+  $$("#pickerDrawer .picker-right li").forEach((li) => {
+    li.addEventListener("click", () => {
+      const t = LEAF_TO_TYPE[li.getAttribute("title")];
+      if (t) showForm(t);
+    });
+  });
+  $("#cancelBtn").addEventListener("click", () => setState("closed"));
+  F.draftClicks = 0;
+  $("#saveDraftBtn").addEventListener("click", () => { F.draftClicks++; });
+
+  $("#saveBtn").addEventListener("click", () => {
+    const type = F.state;
+    if (!(type in FORMS)) return;
+    const v = captureForm();
+    const missing = [];
+    const req = {
+      hotel: ["city", "checkin", "checkout", "receiptFiles", "amount", "currency"],
+      meal: ["amount", "currency"],
+      taxi: ["rideshare", "amount", "currency"],
+      flight: ["flightDate", "amount", "currency"],
+      train: ["amount", "currency"],
+    }[type];
+    for (const k of req) {
+      const val = v[k];
+      if (val === "" || val == null || val === 0 || (typeof val === "number" && isNaN(val))) missing.push(k);
+    }
+    // TAE: amount must be a positive number.
+    if (!/^\d+(\.\d+)?$/.test(String(v.amount || ""))) missing.push("amount:non-numeric");
+    else if (!(parseFloat(v.amount) > 0)) missing.push("amount:non-positive");
+    if (missing.length) {
+      F.rejected.push({ type, missing, values: v });
+      const err = $("#saveError");
+      err.textContent = "缺少必填项: " + missing.join(", ");
+      err.classList.remove("hidden");
+      return;
+    }
+    F.saved.push({ type, ...v });
+    // Append a table row like TAE does.
+    const tr = document.createElement("tr");
+    const cur = String(v.currency).split(" ")[0];
+    tr.innerHTML = `<td><input type="checkbox"></td><td>${$("#expenseRows").children.length + 1}</td><td>${v.checkin || v.date || v.flightDate || ""}</td>` +
+      `<td>${(v.receiptFiles || v.attachmentFiles) ? "📎 " : ""}${v.note || ""}</td><td>${TITLE[type]}</td>` +
+      `<td>${Number(v.amount).toFixed(2)} ${cur}</td><td><a>复制</a> <a>删除</a></td>`;
+    $("#expenseRows").appendChild(tr);
+    setState("closed");
+  });
+
+  function captureForm() {
+    const out = {};
+    $$("#formBody [data-key]").forEach((el) => {
+      const k = el.getAttribute("data-key");
+      if (el.tagName === "INPUT" && el.type === "file") { out[k + "Files"] = el.files ? el.files.length : 0; return; }
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") { out[k] = el.value; return; }
+      // date picker: data-key sits on the wrapper span; the value is on its input
+      if (el.classList.contains("kuma-calendar-picker-input")) { out[k] = el.querySelector("input").value; return; }
+      if (el.classList.contains("kuma-select2")) {
+        const sv = el.querySelector(".kuma-select2-selection-selected-value");
+        out[k] = sv ? sv.textContent.trim() : "";
+        return;
+      }
+      // radio group container
+      const checked = el.querySelector("input[type=radio]:checked");
+      if (checked) out[k] = checked.value;
+      else if (el.querySelector("input[type=radio]")) out[k] = "";
+    });
+    return out;
+  }
+
+  /* ---------------- widget shims ---------------- */
+  const OPTIONS = {
+    currency: ["CNY (人民币）", "USD (美元）", "SGD (新加坡元）", "HKD (港币）", "GBP (英镑）"],
+    city: ["深圳", "上海", "北京", "曼谷", "新加坡"],
+  };
+  let openDropdown = null;
+  function closeAllDropdowns() {
+    if (openDropdown) { openDropdown.list.remove(); openDropdown.search.classList.remove("is-open"); openDropdown.sel.setAttribute("aria-expanded", "false"); openDropdown = null; }
+  }
+  document.body.addEventListener("click", (e) => {
+    if (openDropdown && !openDropdown.wrap.contains(e.target) && !openDropdown.list.contains(e.target)) closeAllDropdowns();
+  }, true);
+
+  function wireForm() {
+    // comboboxes (currency/city only — employee-search has no option list)
+    $$("#formBody .kuma-select2[data-key]").forEach((wrap) => {
+      const key = wrap.getAttribute("data-key");
+      if (!OPTIONS[key]) return;
+      const sel = wrap.querySelector("[role=combobox]");
+      const search = wrap.querySelector(".kuma-select2-search--inline");
+      const searchInput = wrap.querySelector(".kuma-select2-search__field");
+      let list = null;
+      function renderList(filter) {
+        list.innerHTML = "";
+        for (const text of OPTIONS[key]) {
+          if (filter && !text.toLowerCase().includes(filter.toLowerCase())) continue;
+          const li = document.createElement("li");
+          li.setAttribute("role", "option");
+          li.textContent = text;
+          li.style.cssText = "padding:4px 8px;cursor:pointer";
+          li.addEventListener("click", (e) => {
+            e.stopPropagation();
+            let sv = wrap.querySelector(".kuma-select2-selection-selected-value");
+            if (!sv) {
+              sv = document.createElement("div");
+              sv.className = "kuma-select2-selection-selected-value";
+              wrap.querySelector(".kuma-select2-selection__rendered").prepend(sv);
+            }
+            const ph = wrap.querySelector(".kuma-select2-selection__placeholder");
+            if (ph) ph.style.display = "none";
+            sv.textContent = text;
+            sv.setAttribute("title", text);
+            // Like TAE: a currency change kicks off an FX-rate fetch that
+            // populates 汇率 shortly after (base currency SGD → rate 1).
+            if (key === "currency") {
+              const rateEl = document.querySelector('#formBody [data-key="rate"]');
+              if (rateEl) setTimeout(() => { rateEl.value = /^SGD/.test(text) ? "1" : "0.186232"; }, 120);
+            }
+            closeAllDropdowns();
+          });
+          list.appendChild(li);
+        }
+      }
+      sel.addEventListener("click", () => {
+        if (openDropdown && openDropdown.wrap === wrap) return;
+        closeAllDropdowns();
+        search.classList.add("is-open");
+        sel.setAttribute("aria-expanded", "true");
+        list = document.createElement("ul");
+        list.className = "kuma-select2-dropdown";
+        list.style.cssText = "position:absolute;left:1000px;top:100px;background:#fff;border:1px solid #ccc;z-index:99;list-style:none;padding:4px;margin:0";
+        document.body.appendChild(list);
+        renderList("");
+        openDropdown = { wrap, sel, search, list };
+      });
+      searchInput.addEventListener("input", () => { if (list) renderList(searchInput.value); });
+    });
+
+    // calendar triggers
+    $$("#formBody .kuma-calendar-trigger-icon").forEach((icon) => {
+      icon.addEventListener("click", () => {
+        calTarget = icon.parentElement.querySelector("input");
+        cal = { y: 2026, m: 4 };
+        renderCal();
+        $("#calendarPanel").classList.add("is-open");
+        F.calendarOpens++;
+      });
+    });
+
+    // radio yes/no — clicking the <span> text checks the radio (like Kuma)
+    $$("#formBody input[type=radio]").forEach((r) => {
+      r.parentElement.addEventListener("click", () => { r.checked = true; });
+    });
+  }
+
+  /* ---------------- calendar popup ---------------- */
+  let cal = { y: 2026, m: 4 };
+  let calTarget = null;
+  function renderCal() {
+    $("#calHeader").textContent = `${cal.y}年${cal.m}月`;
+    const body = $("#calendarBody");
+    body.innerHTML = "";
+    const daysInMonth = new Date(cal.y, cal.m, 0).getDate();
+    const firstDow = new Date(cal.y, cal.m - 1, 1).getDay();
+    const prevDays = new Date(cal.y, cal.m - 1, 0).getDate();
+    let tr = document.createElement("tr");
+    for (let i = 0; i < firstDow; i++) {
+      const td = document.createElement("td");
+      td.className = "kuma-calendar-cell kuma-calendar-last-month-cell";
+      td.textContent = String(prevDays - firstDow + 1 + i);
+      tr.appendChild(td);
+    }
+    for (let d = 1; d <= daysInMonth; d++) {
+      if (tr.children.length === 7) { body.appendChild(tr); tr = document.createElement("tr"); }
+      const td = document.createElement("td");
+      const iso = `${cal.y}-${String(cal.m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      td.className = "kuma-calendar-cell";
+      td.setAttribute("title", iso);
+      td.textContent = String(d);
+      td.addEventListener("click", () => {
+        if (calTarget) {
+          calTarget.value = iso;
+          calTarget.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        $("#calendarPanel").classList.remove("is-open");
+      });
+      tr.appendChild(td);
+    }
+    let nd = 1;
+    while (tr.children.length < 7) {
+      const td = document.createElement("td");
+      td.className = "kuma-calendar-cell kuma-calendar-next-month-cell";
+      td.textContent = String(nd++);
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  $("#calPrev").addEventListener("click", () => { cal.m -= 1; if (cal.m === 0) { cal.m = 12; cal.y -= 1; } renderCal(); });
+  $("#calNext").addEventListener("click", () => { cal.m += 1; if (cal.m === 13) { cal.m = 1; cal.y += 1; } renderCal(); });
+
+  setState("closed");
+})();
+</script>
+</body>
+</html>
