@@ -126,11 +126,28 @@
       attached,
       perRecord,
     };
-    hideOverlay(`已写入 ${filled} / ${records.length} 条 (附件 ${attached})`);
+    const failures = perRecord.filter((r) => !r.ok);
+    hideOverlay(
+      failures.length
+        ? `已写入 ${filled} / ${records.length} 条，${failures.length} 条失败`
+        : `已写入 ${filled} / ${records.length} 条 (附件 ${attached})`,
+    );
     if (filled === 0) {
-      throw new Error("0 条写入成功——请打开 DevTools 控制台查看 [FliggyClaim] 日志");
+      throw new Error(
+        failures[0]?.error
+          ? `0 条写入成功：${failures[0].error}`
+          : "0 条写入成功——请打开 DevTools 控制台查看 [FliggyClaim] 日志",
+      );
     }
-    return { filled, attached };
+    // Surface partial failures: a record we refuse to save (e.g. the amount
+    // wouldn't take) must never be silently rounded down to "done".
+    return {
+      filled,
+      attached,
+      failed: failures.length,
+      firstError: failures[0]?.error || null,
+      failedIndexes: failures.map((r) => r.index),
+    };
   }
 
   async function fillSingleExpense(rec, attachment) {
@@ -146,18 +163,28 @@
     // 3. Click the matching leaf
     const leaf = await findCategoryLeaf(rec.type);
     if (!leaf) throw new Error(`没找到「${CATEGORY_LEAF[rec.type]?.[0] || rec.type}」类别项`);
+    const leafTitle = (leaf.textContent || "").trim();
     log("→ clicking category leaf", leaf);
     clickEl(leaf);
 
-    // 4. Wait for category form. 10s — TAE drawers occasionally take 2–3s on
-    // first open while the schema loads.
-    const form = await waitFor(() => findCategoryForm(), 10000, "category form");
-    // Title sniff: prefer text that starts with "差旅-" inside the form scope,
-    // else fall back to any heading.
-    const titleEl = Array.from(form.querySelectorAll("h1, h2, h3, h4, div, span"))
-      .filter(isVisible)
-      .find((el) => /^差旅-/.test((el.textContent || "").trim()) && (el.textContent || "").trim().length < 12);
-    const formTitle = (titleEl?.textContent || form.querySelector("h1, h2, h3, h4")?.textContent || "").trim();
+    // 4. Wait for the category form to be READY (fields rendered), not merely
+    // present. Returning on a half-rendered drawer is what let
+    // findCategoryForm() walk all the way up to the page wrapper — which drags
+    // the left-hand expense table (and its own 「金额」 column header) into
+    // scope, so 金额 resolved to a table row checkbox.
+    const form = await waitFor(
+      () => {
+        const f = findCategoryForm();
+        return f && isFormReady(f) ? f : null;
+      },
+      10000,
+      "category form",
+    );
+    // The leaf we just clicked IS the form's identity. Sniffing a title out of
+    // the DOM broke as soon as the drawer scope tightened (the heading lives
+    // outside the form body), and an empty title silently disabled every
+    // hotel-specific branch below.
+    const formTitle = leafTitle || sniffFormTitle(form);
     log("→ category form opened, title:", formTitle, form);
 
     // 5. Fill fields based on visible labels in the form
@@ -229,27 +256,18 @@
     );
   }
 
-  // Same anchor strategy as findInputByLabel, but specifically for file inputs
-  // (which findInputByLabel/pickFillable deliberately exclude).
-  // Heuristic fallback when findInputByLabel returns nothing for "金额".
-  // Strategy: find any element whose text is exactly "金额" (no parent walk
-  // restrictions, no table-scope filter) and pick the input visually closest
-  // to it on the right or below — the field that LOOKS like the amount cell.
+  // Geometric fallback when the label-anchored lookup finds nothing for 金额:
+  // pick the input visually closest to a 金额 label, to its right or below.
   function findAmountInputByHeuristic(scope) {
     const root = scope || document;
-    const labelEls = Array.from(root.querySelectorAll("label, span, div, dt, p, th, em, b, strong"))
-      .filter(isVisible)
-      .filter((el) => {
-        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
-        return t === "金额" || t === "金额：" || t === "金额:";
-      });
+    const labelEls = collectLabelEls(root, LABELS.amount, true);
     if (!labelEls.length) return null;
     const inputs = Array.from(root.querySelectorAll('input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([disabled]):not([readonly])'))
       .filter(isVisible)
       // Skip inputs inside the read-only expense table on the left.
       .filter((el) => !isInTableScope(el))
-      // Prefer numeric / placeholder-empty inputs that look like amount fields.
-      ;
+      // Never a dropdown's typeahead box — writing there wipes its selection.
+      .filter((el) => !BAD_CONTROL_CLS.test((el.className || "").toString()));
     let best = null;
     let bestScore = -Infinity;
     for (const lbl of labelEls) {
@@ -278,31 +296,27 @@
     return best;
   }
 
+  // Same row-scoped anchor strategy as findControlByLabel, but for file inputs
+  // (which pickControl deliberately excludes).
   function findFileInputByLabel(scope, labels) {
     if (!scope) return null;
-    const allMatching = Array.from(scope.querySelectorAll("label, span, div, dt, p, th"))
-      .filter(isVisible)
-      .filter((el) => {
-        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
-        return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      });
-    const nonTable = allMatching.filter((el) => !isInTableScope(el));
-    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
-    const pickFile = (el) => el && el.querySelector
-      ? el.querySelector('input[type="file"]:not([disabled])') : null;
-    for (const lbl of labelEls) {
-      let cur = lbl;
-      for (let i = 0; i < 4; i++) {
-        cur = cur.nextElementSibling;
-        if (!cur) break;
-        const fi = pickFile(cur);
-        if (fi) return fi;
-      }
-      let parent = lbl.parentElement;
-      for (let i = 0; i < 3 && parent; i++) {
-        const fi = pickFile(parent);
-        if (fi) return fi;
-        parent = parent.parentElement;
+    const pickFile = (el) => (el && el.querySelector
+      ? el.querySelector('input[type="file"]:not([disabled])') : null);
+    for (const loose of [false, true]) {
+      for (const lbl of collectLabelEls(scope, labels, loose)) {
+        let sib = lbl.nextElementSibling;
+        for (let i = 0; i < 3 && sib; i++) {
+          const fi = pickFile(sib);
+          if (fi) return fi;
+          sib = sib.nextElementSibling;
+        }
+        let cur = lbl.parentElement;
+        for (let i = 0; i < 4 && cur && cur !== scope; i++) {
+          if (fieldRowsIn(cur).length > 1 || containsForeignLabel(cur, labels)) break;
+          const fi = pickFile(cur);
+          if (fi) return fi;
+          cur = cur.parentElement;
+        }
       }
     }
     return null;
@@ -362,14 +376,43 @@
     return findVisibleByContains(candidates);
   }
 
+  // A "field row" is TAE's one-label-one-control wrapper (`field_xxxx`), the
+  // unit every label lookup must stay inside.
+  const FIELD_ROW_SEL =
+    '[class*="field_"], [class*="field-"], [class*="formItem"], [class*="form-item"], [class*="FormItem"], .kuma-form-item';
+
+  function fieldRowsIn(el) {
+    if (!el || !el.querySelectorAll) return [];
+    return Array.from(el.querySelectorAll(FIELD_ROW_SEL)).filter(isVisible);
+  }
+
+  // How much of a form body does this container hold? Prefer counting real
+  // field rows; fall back to counting visible controls so a class-name change
+  // in TAE's CSS-module hashes can't take the whole flow down.
+  function formBodyWeight(el) {
+    const rows = fieldRowsIn(el).length;
+    if (rows) return rows;
+    return Array.from(
+      el.querySelectorAll('input:not([type="hidden"]):not([type="file"]), textarea, [role="combobox"]'),
+    ).filter(isVisible).length;
+  }
+
   function findCategoryForm() {
     // Anchor on the 「保存」 button: the category FORM drawer has one, the
-    // category PICKER drawer does NOT. Walking up from the save button is
-    // far more reliable than walking up from a "差旅-XXX" title text — TAE
-    // nests its form bodies 7–9 levels deep, deeper than is safe to walk
-    // from a title (you'd cross into the page wrapper).
-    // The button's textContent may be "保存", "保存 ▾", "保存▾", or 保存草稿;
-    // accept any starts-with-保存 that isn't 保存草稿.
+    // category PICKER drawer does NOT. Then walk up only as far as the
+    // SMALLEST container that actually holds the form body.
+    //
+    // Two hard stops keep the scope honest:
+    //   • never accept a container that also holds the 「新增费用」 toolbar
+    //     button — that button lives in the master (left) pane, so such a
+    //     container is the page wrapper, and the expense table inside it has
+    //     its own 「金额」 column header that hijacks every label lookup;
+    //   • never accept table chrome.
+    // The old version stopped at the first ancestor holding *any* input whose
+    // text merely mentioned 金额/费用发生 — on a not-yet-rendered drawer that
+    // matched the page wrapper, because the left-hand table supplies exactly
+    // those words.
+    const addBtn = findAddExpenseButton();
     const saves = Array.from(document.querySelectorAll("button"))
       .filter(isVisible)
       .filter((b) => {
@@ -378,21 +421,31 @@
       });
     for (const save of saves) {
       let cur = save.parentElement;
-      // Walk up until we find an ancestor that holds form fields AND looks
-      // like a category form (Chinese form labels we recognize).
       for (let i = 0; i < 14 && cur; i++) {
-        if (cur.querySelector && cur.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]')) {
-          // Sanity: container should include category-form-ish text — guards
-          // against returning a page-wide wrapper if other 保存 buttons exist.
-          const txt = cur.textContent || "";
-          if (/差旅-|有收据|无收据|费用发生|金额|币种|入住时间|乘机日期/.test(txt)) {
-            return cur;
-          }
-        }
+        if (addBtn && cur.contains(addBtn)) break; // walked into the master pane
+        if (cur === document.body || cur === document.documentElement) break;
+        if (!isInTableScope(cur) && formBodyWeight(cur) >= 2) return cur;
         cur = cur.parentElement;
       }
     }
     return null;
+  }
+
+  // The drawer mounts its 保存 button before the schema-driven fields land.
+  // Treat it as usable only once the fields are actually there.
+  function isFormReady(form) {
+    if (!form) return false;
+    if (collectLabelEls(form, LABELS.amount).length) return true;
+    return fieldRowsIn(form).length >= 3;
+  }
+
+  // Only a fallback now — the clicked category leaf is the authoritative title.
+  function sniffFormTitle(form) {
+    const scope = form?.closest('[class*="detail"], [class*="drawer"], [class*="content"]') || document;
+    const el = Array.from(scope.querySelectorAll("h1, h2, h3, h4, div, span"))
+      .filter(isVisible)
+      .find((n) => /^差旅-/.test((n.textContent || "").trim()) && (n.textContent || "").trim().length < 12);
+    return (el?.textContent || "").trim();
   }
 
   function findSaveButton(scope) {
@@ -456,25 +509,24 @@
     // Common fields
     const cityName = rec.city || extractCityFromNote(rec.note) || extractCityFromNote(rec.source) || "上海";
     if (isHotel) {
-      const ci = findInputByLabel(form, LABELS.checkin);
+      const ci = findControlByLabel(form, LABELS.checkin, "date");
       const checkinDate = rec.checkin || rec.date;
       if (ci) await setDateLikeValue(ci, checkinDate);
-      const co = findInputByLabel(form, LABELS.checkout);
+      const co = findControlByLabel(form, LABELS.checkout, "date");
       const checkoutDate = rec.checkout || addNDays(checkinDate, rec.nights || 1);
       if (co) await setDateLikeValue(co, checkoutDate);
     } else {
       // 费用发生时间 (optional on most forms, required on none of the screenshots)
-      const dateEl = findInputByLabel(form, LABELS.date);
+      const dateEl = findControlByLabel(form, LABELS.date, "date");
       if (dateEl) await setDateLikeValue(dateEl, rec.date);
       // 乘机日期★ — only on the flight form, and it IS required.
       if (isFlight) {
-        const fdEl = findInputByLabel(form, LABELS.flightDate);
+        const fdEl = findControlByLabel(form, LABELS.flightDate, "date");
         if (fdEl) await setDateLikeValue(fdEl, rec.date);
       }
     }
     // 城市 may exist on hotel/meal/taxi/other forms — try unconditionally.
-    const cityEl = findInputByLabel(form, LABELS.city);
-    if (cityEl) await setComboboxValue(cityEl, [cityName]);
+    await setComboByLabel(form, LABELS.city, [cityName], cityName);
 
     if (isTaxi) {
       // 是否网约车 radio – default to 是
@@ -485,58 +537,70 @@
     // Currency MUST be set before amount: TAE clears the amount field
     // when the currency changes (and re-fetches the FX rate against the
     // report's base currency). Filling amount first would be silently wiped.
-    const cur = findInputByLabel(form, LABELS.currency);
-    if (cur) {
-      await setComboboxValue(cur, [rec.currency, currencyDisplay(rec.currency)]);
-      // Give TAE time to fire the FX-rate request triggered by the change.
-      await sleep(450);
-    }
+    const curOk = await setComboByLabel(
+      form, LABELS.currency,
+      [rec.currency, currencyDisplay(rec.currency)],
+      rec.currency,
+    );
+    // Give TAE time to fire the FX-rate request triggered by the change.
+    if (curOk) await sleep(450);
 
     // Amount – set after currency, then nudge the form to recompute the
-    // converted (本位币) amount. Verify after each strategy and fall back
-    // to a fresh element lookup + retry if the value was silently dropped
-    // (which happens when currency change re-mounted the InputNumber after
-    // we cached a stale node reference).
+    // converted (本位币) amount.
+    //
+    // Every pass RE-RESOLVES the input before reading it back. The old code
+    // verified `el.value` on whatever node it had first landed on, so when the
+    // lookup returned a checkbox the check "passed" purely because we had just
+    // assigned .value to that checkbox — and a record with no amount at all
+    // got saved and reported as ✓.
     const wantAmt = String(rec.amount ?? 0);
-    let amt = findInputByLabel(form, LABELS.amount);
-    // Last-ditch fallback: if label-anchored lookup returns nothing, find the
-    // input that LOOKS like an amount field — required + numeric placeholder
-    // ("请输入") + sits next to a label whose text contains "金额".
-    if (!amt) amt = findAmountInputByHeuristic(form);
-    log("→ amount input:", amt ? describeInput(amt) : "NOT FOUND");
-    if (amt) {
-      await setInputValue(amt, wantAmt);
-      await sleep(180);
-      try {
-        amt.dispatchEvent(new Event("change", { bubbles: true }));
-        amt.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-      } catch {}
-      document.body.click();
-      // Verify and retry once with a fresh node lookup if the value vanished.
-      await sleep(120);
-      let fresh = findInputByLabel(form, LABELS.amount) || findAmountInputByHeuristic(form) || amt;
-      if (parseFloat((fresh.value || "0").toString().replace(/,/g, "")) !== parseFloat(wantAmt)) {
-        log("amount didn't stick on first pass; retrying. got:", fresh.value, "want:", wantAmt);
-        await setInputValue(fresh, wantAmt);
-        await sleep(180);
-        try {
-          fresh.dispatchEvent(new Event("change", { bubbles: true }));
-          fresh.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-        } catch {}
-        document.body.click();
-      }
-      log("amount final value:", fresh.value);
-      outcome.amountFinal = fresh.value;
-      outcome.amountInput = describeInput(fresh);
-      await waitForRatePopulated(form, 2500);
-    } else {
-      warn("amount label not found in form — neither findInputByLabel nor heuristic found a candidate. Run 诊断 to see amountDeepProbe.");
+    let amtEl = findAmountInput(form);
+    log("→ amount input:", amtEl ? describeInput(amtEl) : "NOT FOUND");
+    if (!amtEl) {
+      throw new Error("没找到「金额」输入框——请打开 DevTools 控制台查看 [FliggyClaim] 日志，或运行诊断");
     }
+    let amtOk = false;
+    for (let pass = 1; pass <= 3 && !amtOk; pass++) {
+      await setInputValue(amtEl, wantAmt);
+      await sleep(200);
+      try {
+        amtEl.dispatchEvent(new Event("change", { bubbles: true }));
+        amtEl.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+        amtEl.blur();
+      } catch {}
+      await sleep(150);
+      // Currency changes re-mount the InputNumber, so the node may be stale.
+      amtEl = findAmountInput(form) || amtEl;
+      amtOk = sameAmount(amtEl.value, wantAmt);
+      if (!amtOk) log(`amount pass ${pass} didn't stick. got:`, amtEl.value, "want:", wantAmt);
+    }
+    log("amount final value:", amtEl.value);
+    outcome.amountFinal = amtEl.value;
+    outcome.amountInput = describeInput(amtEl);
+    if (!amtOk) {
+      // Refuse to save a record whose amount we could not write — an expense
+      // row with a blank/wrong 金额 is worse than a failed row the user can
+      // retry, and it used to be reported as a success.
+      throw new Error(`金额没能写入（期望 ${wantAmt}，实际「${amtEl.value}」）——该条已取消，未保存`);
+    }
+    await waitForRatePopulated(form, 2500);
+
+    // The 币种 dropdown sits directly after 金额 in every category form; a
+    // stray focus/blur can knock it back to the report's default currency.
+    // Re-assert it before 保存 — a wrong 币种 silently changes the claim value.
+    await verifyComboByLabel(form, LABELS.currency, [rec.currency, currencyDisplay(rec.currency)], rec.currency);
 
     // Note / 详细说明
-    const note = findInputByLabel(form, LABELS.note);
+    const note = findControlByLabel(form, LABELS.note, "textarea") || findControlByLabel(form, LABELS.note, "text");
     if (note) await setInputValue(note, rec.note || "");
     return outcome;
+  }
+
+  function sameAmount(got, want) {
+    const a = parseFloat((got ?? "").toString().replace(/[,\s￥¥]/g, ""));
+    const b = parseFloat((want ?? "").toString().replace(/[,\s￥¥]/g, ""));
+    if (!isFinite(a) || !isFinite(b)) return false;
+    return Math.abs(a - b) < 0.005;
   }
 
   // Poll the form for a non-zero exchange rate or converted amount.
@@ -608,61 +672,162 @@
     return !!(el && el.closest && el.closest(TABLE_SCOPE_SEL));
   }
 
-  function findInputByLabel(scope, labels) {
-    const scan = scope || document;
-    const allMatching = Array.from(scan.querySelectorAll("label, span, div, dt, p, th"))
-      .filter(isVisible)
-      .filter((el) => {
-        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
-        return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      });
-    // PREFER drawer labels over table column headers (the expense list on the
-    // left has a "金额" column header that would otherwise win in DOM order).
-    // But if EVERY match happens to be in some grid-roled ancestor, fall back
-    // to the full set rather than returning nothing — a Fusion build with
-    // ARIA role="row" on form items shouldn't disqualify the real label.
-    const nonTable = allMatching.filter((el) => !isInTableScope(el));
-    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
+  // Anything that counts as a control. Used both to pick fields AND — just as
+  // importantly — to DISQUALIFY label candidates: a real label never wraps its
+  // own control.
+  const CONTROL_SEL =
+    'input:not([type="hidden"]), textarea, select, [role="combobox"], [contenteditable="true"]';
 
-    for (const lbl of labelEls) {
-      const forId = lbl.getAttribute && lbl.getAttribute("for");
-      if (forId) {
-        const t = scan.querySelector ? scan.querySelector("#" + CSS.escape(forId)) : null;
-        const target = t || document.getElementById(forId);
-        if (target && isVisible(target)) return target;
+  // Normalize label text: drop whitespace, the required-star, and trailing
+  // colons of either width.
+  function normLabel(s) {
+    return (s || "")
+      .replace(/\s+/g, "")
+      .replace(/^[*＊]+/, "")
+      .replace(/[*＊]+$/, "")
+      .replace(/[:：]+$/, "");
+  }
+
+  // A bracketed suffix such as 「金额（元）」 is still the 金额 label.
+  const LOOSE_TAIL = /^[（(【[][^）)】\]]{0,6}[）)】\]]$/;
+
+  const ALL_LABEL_TEXTS = new Set(Object.values(LABELS).flat().map(normLabel));
+
+  /**
+   * Collect the elements that ARE the label for `labels`.
+   *
+   * The `!el.querySelector(CONTROL_SEL)` filter is the fix for the bug that
+   * sent 金额 into the 币种 combobox: TAE's field wrapper has exactly the
+   * label's text as its textContent (an <input> contributes nothing), so the
+   * wrapper matched first in DOM order, and walking to ITS next sibling landed
+   * on the NEXT FIELD's control. A wrapper contains a control; a label doesn't.
+   */
+  function collectLabelEls(scope, labels, loose) {
+    const want = labels.map(normLabel);
+    const cands = Array.from((scope || document).querySelectorAll("label, span, div, dt, p, th, em, b, strong"))
+      .filter(isVisible)
+      .filter((el) => !el.querySelector(CONTROL_SEL));
+    const exact = cands.filter((el) => want.includes(normLabel(el.textContent)));
+    if (exact.length || !loose) return exact;
+    return cands.filter((el) => {
+      const t = normLabel(el.textContent);
+      return want.some((w) => t.length > w.length && t.startsWith(w) && LOOSE_TAIL.test(t.slice(w.length)));
+    });
+  }
+
+  // True once `el` has grown big enough to hold a DIFFERENT field's label —
+  // i.e. climbing one more level would let us reach the wrong control.
+  function containsForeignLabel(el, labels) {
+    const own = new Set(labels.map(normLabel));
+    return Array.from(el.querySelectorAll("label, span, div, dt, p")).some((n) => {
+      if (!isVisible(n) || n.querySelector(CONTROL_SEL)) return false;
+      const t = normLabel(n.textContent);
+      return !!t && ALL_LABEL_TEXTS.has(t) && !own.has(t);
+    });
+  }
+
+  const NON_VALUE_INPUT_TYPES = ["file", "checkbox", "radio", "button", "submit", "reset", "image"];
+  // select2 keeps a text input inside every dropdown (and the employee picker)
+  // purely for typeahead. Writing an amount there does nothing except wipe the
+  // dropdown's current selection — exactly what turned 币种 back into SGD.
+  const BAD_CONTROL_CLS = /select2-search|search__field|mirror|checkbox|radio|switch/i;
+
+  /**
+   * Pick the control of a given kind inside `scope` (a single field row).
+   *   amount   – editable text/number input, prefers TAE's NumberInput wrapper
+   *   date     – calendar input (readonly is normal for these)
+   *   combobox – the VISIBLE select2 selection box (never its hidden search input)
+   *   textarea – textarea
+   *   text/any – first usable control
+   */
+  function pickControl(scope, kind) {
+    if (!scope || !scope.querySelectorAll) return null;
+    const vis = (sel) => Array.from(scope.querySelectorAll(sel)).filter(isVisible);
+    const textInputs = vis('input:not([type="hidden"])')
+      .filter((el) => !NON_VALUE_INPUT_TYPES.includes((el.type || "text").toLowerCase()))
+      .filter((el) => !el.disabled)
+      .filter((el) => !BAD_CONTROL_CLS.test((el.className || "").toString()));
+    const isCalendar = (el) =>
+      /calendar|datepicker/i.test(((el.className || "") + " " + (el.parentElement?.className || "")).toString());
+
+    switch (kind) {
+      case "amount": {
+        const editable = textInputs.filter((el) => !el.readOnly && !isCalendar(el));
+        return (
+          editable.find((el) => el.closest('[class*="numberInput"], [class*="number-input"], [class*="InputNumber"]')) ||
+          editable.find((el) => (el.type || "").toLowerCase() === "number") ||
+          editable[0] ||
+          null
+        );
       }
-      let cur = lbl;
-      for (let i = 0; i < 4; i++) {
-        cur = cur.nextElementSibling;
-        if (!cur) break;
-        const inp = pickFillable(cur);
-        if (inp) return inp;
-      }
-      let parent = lbl.parentElement;
-      for (let i = 0; i < 3 && parent; i++) {
-        let sib = parent.nextElementSibling;
-        for (let j = 0; j < 3 && sib; j++) {
-          const inp = pickFillable(sib);
-          if (inp) return inp;
+      case "date":
+        return textInputs.find(isCalendar) || textInputs.find((el) => el.readOnly) || textInputs[0] || null;
+      case "combobox":
+        return (
+          vis('[class*="select2-selection"]').find((el) => !el.getAttribute("disabled")) ||
+          vis('[role="combobox"]')[0] ||
+          vis("select:not([disabled])")[0] ||
+          null
+        );
+      case "textarea":
+        return vis("textarea:not([disabled])")[0] || null;
+      case "text":
+      default:
+        return (
+          textInputs.find((el) => !el.readOnly) ||
+          vis("textarea:not([disabled])")[0] ||
+          textInputs[0] ||
+          vis('[role="combobox"], select:not([disabled])')[0] ||
+          null
+        );
+    }
+  }
+
+  /**
+   * Label-anchored control lookup that never leaves the label's own field row.
+   * Resolution order: for= binding → the label's own next siblings → climb,
+   * stopping the instant the ancestor also owns another field.
+   */
+  function findControlByLabel(scope, labels, kind) {
+    const scan = scope || document;
+    for (const loose of [false, true]) {
+      for (const lbl of collectLabelEls(scan, labels, loose)) {
+        const forId = lbl.getAttribute && lbl.getAttribute("for");
+        if (forId) {
+          const target = document.getElementById(forId);
+          if (target && isVisible(target)) return target;
+        }
+        // (a) siblings of the label — same field row by construction
+        let sib = lbl.nextElementSibling;
+        for (let i = 0; i < 3 && sib; i++) {
+          const c = pickControl(sib, kind);
+          if (c) return c;
           sib = sib.nextElementSibling;
         }
-        const inSame = pickFillable(parent);
-        if (inSame && inSame !== lbl) return inSame;
-        parent = parent.parentElement;
+        // (b) climb to the row wrapper, but no further than this field
+        let cur = lbl.parentElement;
+        for (let i = 0; i < 4 && cur && cur !== scan; i++) {
+          if (fieldRowsIn(cur).length > 1 || containsForeignLabel(cur, labels)) break;
+          const c = pickControl(cur, kind);
+          if (c) return c;
+          cur = cur.parentElement;
+        }
       }
     }
     return null;
   }
 
+  // Kept for the diagnostics probes.
+  function findInputByLabel(scope, labels) {
+    return findControlByLabel(scope, labels, "any");
+  }
+
+  function findAmountInput(form) {
+    return findControlByLabel(form, LABELS.amount, "amount") || findAmountInputByHeuristic(form);
+  }
+
   function findRadioByLabel(scope, labels, optionText) {
-    const allMatching = Array.from((scope || document).querySelectorAll("label, span, div, dt, p, th"))
-      .filter(isVisible)
-      .filter((el) => {
-        const t = (el.textContent || "").trim().replace(/^[*\s]+/, "");
-        return labels.some((l) => t === l || t === l + "：" || t === l + ":");
-      });
-    const nonTable = allMatching.filter((el) => !isInTableScope(el));
-    const labelEls = nonTable.length > 0 ? nonTable : allMatching;
+    const labelEls = collectLabelEls(scope || document, labels, true);
     for (const lbl of labelEls) {
       let parent = lbl.parentElement;
       for (let i = 0; i < 4 && parent; i++) {
@@ -674,17 +839,6 @@
       }
     }
     return null;
-  }
-
-  function pickFillable(scope) {
-    if (!scope || !scope.querySelector) return null;
-    return (
-      scope.querySelector('input:not([type="hidden"]):not([type="file"]):not([disabled])') ||
-      scope.querySelector("textarea:not([disabled])") ||
-      scope.querySelector("select:not([disabled])") ||
-      scope.querySelector('[role="combobox"]') ||
-      null
-    );
   }
 
   /* ---------- Field setters ---------- */
@@ -815,43 +969,113 @@
     return true;
   }
 
-  async function setComboboxValue(el, candidateTexts) {
+  // Compare display text width-insensitively: TAE renders 「CNY (人民币）」 with
+  // a fullwidth closing paren, which no literal in this file would ever match.
+  function normText(s) {
+    return (s || "")
+      .toString()
+      .replace(/\s+/g, "")
+      .replace(/[（]/g, "(")
+      .replace(/[）]/g, ")")
+      .toUpperCase();
+  }
+
+  // What the select2 widget currently shows as its selection ("" if none).
+  // Order matters: the dedicated value node must win over the __rendered
+  // wrapper, which still holds the (display:none) placeholder as text.
+  function readComboSelection(comp) {
+    if (!comp) return "";
+    const el =
+      comp.querySelector('[class*="selection-selected-value"]') ||
+      comp.querySelector('[class*="selection__choice"]') ||
+      comp.querySelector('[class*="selection__rendered"]');
+    if (!el) return "";
+    let txt = (el.getAttribute("title") || "").trim();
+    if (!txt) {
+      txt = Array.from(el.childNodes)
+        .filter((n) => n.nodeType === 3
+          || (n.nodeType === 1 && isVisible(n) && !/search/i.test((n.className || "").toString())))
+        .map((n) => (n.textContent || "").trim())
+        .join("")
+        .trim();
+    }
+    return /^(请选择|请输入|输入姓名)/.test(txt) ? "" : txt;
+  }
+
+  async function setComboByLabel(form, labels, candidateTexts, wantCode) {
+    const combo = findControlByLabel(form, labels, "combobox");
+    if (!combo) return false;
+    return await setComboboxValue(combo, candidateTexts, wantCode);
+  }
+
+  // Re-assert a dropdown that something else may have clobbered. Only acts
+  // when we can read a selection that definitively differs from what we want.
+  async function verifyComboByLabel(form, labels, candidateTexts, wantCode) {
+    const combo = findControlByLabel(form, labels, "combobox");
+    if (!combo) return true;
+    const comp = comboComponent(combo);
+    const got = readComboSelection(comp);
+    if (!got || normText(got).includes(normText(wantCode))) return true;
+    warn(`${labels[0]} 被改回了「${got}」，重设为 ${wantCode}`);
+    return await setComboboxValue(combo, candidateTexts, wantCode);
+  }
+
+  function comboComponent(el) {
+    return el.closest('[class*="kuma-select2"], [class*="select_"], [class*="employee-search"]') || el.parentElement || el;
+  }
+
+  /**
+   * Drive a kuma-select2 dropdown.
+   *
+   * `el` is the VISIBLE selection box (or a native <select>). The widget keeps
+   * its typeahead <input> at display:none until it opens, and events dispatched
+   * at a display:none input do nothing — which is why 币种 used to stay on the
+   * report's default currency. So: click the selection box first, then type.
+   */
+  async function setComboboxValue(el, candidateTexts, wantCode) {
     if (!el) return false;
+    const wants = candidateTexts.filter(Boolean).map(normText);
     if (el.tagName === "SELECT") {
-      const opt = Array.from(el.options).find((o) =>
-        candidateTexts.some((t) => (o.textContent || "").includes(t)),
-      );
+      const opt = Array.from(el.options).find((o) => wants.some((t) => normText(o.textContent).includes(t)));
       if (!opt) return false;
       el.value = opt.value;
       el.dispatchEvent(new Event("change", { bubbles: true }));
       return true;
     }
-    el.focus();
-    clickEl(el);
-    await sleep(150);
-    // Type the first candidate to filter
-    const proto = HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-    if (setter) setter.call(el, candidateTexts[0]);
-    else el.value = candidateTexts[0];
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    await sleep(250);
+    const comp = comboComponent(el);
+    // Open the dropdown — this is what reveals the typeahead input.
+    clickEl(comp.querySelector('[class*="select2-selection"]') || el);
+    await sleep(220);
+    const search = Array.from(comp.querySelectorAll('input[class*="search__field"], input[type="text"], input:not([type])'))
+      .find((i) => !i.disabled) || (el.tagName === "INPUT" ? el : null);
+    if (search) {
+      try { search.focus(); } catch {}
+      setNativeValue(search, candidateTexts[0]);
+      try {
+        search.dispatchEvent(new InputEvent("input", { bubbles: true, data: candidateTexts[0], inputType: "insertText" }));
+      } catch {
+        search.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await sleep(320);
+    }
     const opts = Array.from(
       document.querySelectorAll(
         '[role="option"], li[class*="option"], div[class*="option-item"], div[class*="MenuItem"]',
       ),
     ).filter(isVisible);
     log("combobox options visible:", opts.length, opts.slice(0, 5).map((o) => (o.textContent || "").trim()));
-    const opt = opts.find((o) =>
-      candidateTexts.some((t) => (o.textContent || "").trim().includes(t)),
-    );
+    const opt = opts.find((o) => wants.some((t) => normText(o.textContent).includes(t)));
     if (opt) {
       clickEl(opt);
-      await sleep(150);
-      return true;
+      await sleep(220);
+    } else if (search) {
+      search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, keyCode: 13 }));
+      await sleep(220);
     }
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    return false;
+    const got = readComboSelection(comp);
+    const ok = !wantCode || (!!got && normText(got).includes(normText(wantCode)));
+    log("combobox selected:", got || "(空)", ok ? "✓" : `✗ 期望 ${wantCode}`);
+    return ok;
   }
 
   /* ---------- Diagnostics ---------- */

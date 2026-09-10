@@ -472,7 +472,17 @@ async function importToSystem() {
       console.log("[FliggyClaim] FLIGGY_FILL response:", resp);
       if (resp && resp.ok) {
         const tail = resp.attached != null ? `, 附件 ${resp.attached}` : "";
-        toast(`已写入 ${resp.filled} / ${state.records.length} 条到报销系统${tail}`);
+        if (resp.failed) {
+          // Records we refused to save (e.g. 金额 wouldn't stick) are reported
+          // as failures, not quietly dropped from the count.
+          const which = resp.failedIndexes?.length ? `第 ${resp.failedIndexes.join("、")} 条` : `${resp.failed} 条`;
+          toast(
+            `已写入 ${resp.filled} / ${state.records.length} 条${tail}；${which}失败：${resp.firstError || "未知原因"}`,
+            "error",
+          );
+        } else {
+          toast(`已写入 ${resp.filled} / ${state.records.length} 条到报销系统${tail}`);
+        }
       } else {
         toast(resp?.error || "写入失败，请打开 DevTools 查看日志", "error");
       }
