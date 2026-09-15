@@ -21,7 +21,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { pageHtml, installCalendarBehavior } from "./fixtures/tae-page.js";
+import { pageHtml, installCalendarBehavior, installUploadBehavior } from "./fixtures/tae-page.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = process.env.FC_SRC || path.join(HERE, "..", "content", "content.js");
@@ -34,7 +34,7 @@ try {
   process.exit(2);
 }
 
-function load(kind, calendarOpts) {
+function load(kind, calendarOpts, uploadOpts) {
   const { window } = new JSDOM(pageHtml(kind), { pretendToBeVisual: true });
 
   // jsdom does no layout, so every getBoundingClientRect() is 0×0 and
@@ -60,10 +60,20 @@ function load(kind, calendarOpts) {
 
   for (const k of [
     "getComputedStyle", "HTMLInputElement", "HTMLElement", "Element", "Node", "InputEvent",
-    "Event", "MouseEvent", "KeyboardEvent", "FocusEvent", "CSS", "DataTransfer", "File",
+    "Event", "MouseEvent", "KeyboardEvent", "FocusEvent", "CSS",
     // NB: never alias setTimeout/clearTimeout here — jsdom's timers call the
     // environment's global ones, so aliasing them makes jsdom recurse forever.
+    // NB: File stays Node's, so it accepts the Blob that Node's fetch returns.
   ]) globalThis[k] = window[k];
+  // jsdom has no DataTransfer; the extension uses it to hand a File to an
+  // <input type="file">, exactly as a real drop/pick would.
+  globalThis.DataTransfer = class {
+    constructor() {
+      const held = [];
+      this.items = { add: (f) => held.push(f) };
+      Object.defineProperty(this, "files", { get: () => Object.assign(held.slice(), { item: (i) => held[i] }) });
+    }
+  };
   globalThis.window = window;
   globalThis.document = window.document;
   globalThis.location = window.location;
@@ -76,12 +86,14 @@ function load(kind, calendarOpts) {
   const open = "(() => {";
   const body = src.slice(src.indexOf(open) + open.length, src.lastIndexOf("})();"));
   if (calendarOpts) installCalendarBehavior(window, calendarOpts);
+  if (uploadOpts) installUploadBehavior(window, uploadOpts);
 
   const names = [
     "findCategoryForm", "isFormReady", "findAmountInput", "findControlByLabel", "collectLabelEls",
     "findFileInputByLabel", "findAddExpenseButton", "findCategoryPicker", "describeInput",
     "isVisible", "pickControl", "readComboSelection", "comboComponent", "sameAmount", "normText",
     "setDateLikeValue", "fillDate", "isRequiredField", "dateStuck",
+    "attachReceiptFile", "waitForUploadRegistered", "fieldRowOf",
   ];
   const exports = `; return { LABELS, ${names
     .map((n) => `${n}: (typeof ${n} === "function" ? ${n} : null)`)
@@ -244,6 +256,53 @@ const rowOf = (label) => Array.from(document.querySelectorAll(".field_PlvYD"))
     check("返回 false 而不是抛错", r === false);
   } catch (e) { threw = e.message; }
   check("选填日期失败不影响这条记录", !threw, threw || "");
+}
+
+/* ---------- 附件上传 ---------- */
+{
+  console.log("\n附件上传:");
+  const att = { mime: "image/png", data: Buffer.from("fake-png").toString("base64") };
+  {
+    const api = load("hotel", null, { uploadMs: 300 });
+    const r = await api.attachReceiptFile(api.findCategoryForm(), att, "深圳酒店1晚68444.png", "差旅-住宿");
+    check("上传成功 → ok=true", r.ok === true, JSON.stringify(r));
+    check("落在必填的「酒店住宿相关凭证」槽位", r.label === "酒店住宿相关凭证" && r.required === true, JSON.stringify(r));
+    check("文件真的进了附件列表",
+      /深圳酒店/.test(document.getElementById("hotel-receipt").closest('[class*="upload-component"]').textContent));
+  }
+  {
+    const api = load("meal", null, { uploadMs: 200 });
+    const r = await api.attachReceiptFile(api.findCategoryForm(), att, "深圳机场餐饮94.PNG", "差旅-餐费");
+    check("餐费表单的附件是选填 → required=false", r.ok === true && r.required === false, JSON.stringify(r));
+  }
+  {
+    const api = load("meal", null, { uploadMs: 1200 });
+    const t0 = Date.now();
+    const r = await api.attachReceiptFile(api.findCategoryForm(), att, "slow.png", "差旅-餐费");
+    check("上传没结束不会提前返回（保存会丢附件）",
+      r.ok === true && Date.now() - t0 >= 1200, `${Date.now() - t0}ms ${JSON.stringify(r)}`);
+  }
+}
+{
+  console.log("\n附件上传失败的几种情况:");
+  const api = load("hotel", null, { broken: true });
+  const row = api.fieldRowOf(document.getElementById("hotel-receipt"));
+  const r1 = await api.waitForUploadRegistered(row, "x.png", 1200);
+  check("组件完全没反应 → ok=false", r1.ok === false && /没出现/.test(r1.reason), JSON.stringify(r1));
+
+  const api2 = load("hotel", null, { uploadMs: 200, fails: true });
+  const input2 = document.getElementById("hotel-receipt");
+  input2.files = [{ name: "x.png" }];
+  input2.dispatchEvent(new window.Event("change", { bubbles: true }));
+  const r2 = await api2.waitForUploadRegistered(api2.fieldRowOf(input2), "x.png", 3000);
+  check("上传组件报错 → ok=false", r2.ok === false && /报错/.test(r2.reason || ""), JSON.stringify(r2));
+
+  const api3 = load("hotel", null, { uploadMs: 200, stuckProgress: true });
+  const input3 = document.getElementById("hotel-receipt");
+  input3.files = [{ name: "x.png" }];
+  input3.dispatchEvent(new window.Event("change", { bubbles: true }));
+  const r3 = await api3.waitForUploadRegistered(api3.fieldRowOf(input3), "x.png", 8000);
+  check("进度条残留不会被误判成上传中", r3.ok === true, JSON.stringify(r3));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

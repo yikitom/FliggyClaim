@@ -267,6 +267,40 @@ export function installCalendarBehavior(window, opts = {}) {
   });
 }
 
+/**
+ * Emulate the upload component: on `change` it shows a progress row, then
+ * after `uploadMs` replaces it with the file entry. `broken: true` models a
+ * slot that ignores the synthetic change event entirely, and `failMs` models
+ * an upload that errors out.
+ *
+ * @param {Window} window
+ * @param {{uploadMs?: number, broken?: boolean, fails?: boolean}} opts
+ */
+export function installUploadBehavior(window, opts = {}) {
+  const { document } = window;
+  const { uploadMs = 300, broken = false, fails = false, stuckProgress = false } = opts;
+  for (const input of document.querySelectorAll('input[type="file"]')) {
+    // jsdom's `files` is getter-only; make it assignable so the extension's
+    // DataTransfer hand-off behaves like it does in Chrome.
+    Object.defineProperty(input, "files", { writable: true, configurable: true, value: [] });
+    input.addEventListener("change", () => {
+      if (broken) return;
+      const name = input.files?.[0]?.name;
+      if (!name) return;
+      const list = input.closest('[class*="upload-component"]')?.querySelector('[class*="file-list"]');
+      if (!list) return;
+      list.innerHTML = `<div class="upload-progress_2kd">上传中…</div>`;
+      window.setTimeout(() => {
+        if (fails) list.innerHTML = `<div class="upload-error_9dK">上传失败</div>`;
+        // stuckProgress: the file is listed but a completed progress bar stays
+        // in the DOM — a real pattern that must not read as "still uploading".
+        else if (stuckProgress) list.innerHTML = `<div class="file-item_1aB">${name}</div><div class="upload-progress_2kd"></div>`;
+        else list.innerHTML = `<div class="file-item_1aB">${name}</div>`;
+      }, uploadMs);
+    });
+  }
+}
+
 /** @param {"meal"|"hotel"|"skeleton"|"picker"} kind */
 export function pageHtml(kind) {
   let drawer;

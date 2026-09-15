@@ -193,7 +193,14 @@
     // 5b. Attach the source receipt file (if popup provided one)
     let attached = false;
     if (attachment && attachment.data) {
-      attached = await attachReceiptFile(form, attachment, rec.source, formTitle);
+      const res = await attachReceiptFile(form, attachment, rec.source, formTitle);
+      attached = !!res.ok;
+      if (!res.ok && res.required) {
+        // 酒店住宿相关凭证★ is required; saving without it produces a claim the
+        // approver will bounce. Fail the record instead.
+        throw new Error(`「${res.label}」没上传成功（${rec.source}）：${res.reason}——该条已取消，未保存`);
+      }
+      if (!res.ok) warn(`附件未上传（非必填，继续保存）: ${rec.source} — ${res.reason}`);
     }
 
     // 6. Click 保存 inside the form
@@ -210,18 +217,22 @@
   /* ---------- File attachment ---------- */
 
   async function attachReceiptFile(form, att, filename, formTitle) {
+    let slotLabel = "附件";
+    let required = false;
     try {
       const isHotel = /住宿|酒店/.test(formTitle || "");
       // Hotel forms have TWO file inputs: 酒店住宿相关凭证★ (required) and 附件
       // (optional). Always prefer the required slot — uploading to 附件 won't
       // satisfy the validator and 保存 will fail.
       let input = isHotel ? findFileInputByLabel(form, LABELS.hotelReceipt) : null;
+      if (input) slotLabel = LABELS.hotelReceipt[0];
       if (!input) input = findFileInputByLabel(form, LABELS.attachment);
       if (!input) input = findFileInput(form);
       if (!input) {
         log("no file input found in form, skipping attachment for", filename);
-        return false;
+        return { ok: false, required: false, label: slotLabel, reason: "表单里没有附件上传框" };
       }
+      required = isRequiredField(input);
       log(`→ attaching ${filename} to`, isHotel ? "hotelReceipt slot" : "attachment slot", input);
       const dataUrl = `data:${att.mime || "application/octet-stream"};base64,${att.data}`;
       const blob = await fetch(dataUrl).then((r) => r.blob());
@@ -236,14 +247,56 @@
       }
       input.dispatchEvent(new Event("change", { bubbles: true }));
       input.dispatchEvent(new Event("input", { bubbles: true }));
-      log(`→ attached ${filename} (${file.size} B) to`, input);
-      // Wait briefly for the upload component to register and show progress.
-      await sleep(1500);
-      return true;
+      log(`→ handed ${filename} (${file.size} B) to`, input);
+      // The old code slept 1500ms and returned true — so a slot that ignored
+      // the change event, or an upload still in flight when 保存 fired, both
+      // counted as "attached". Wait for the component to actually list the
+      // file and finish uploading, and say so when it doesn't.
+      const res = await waitForUploadRegistered(fieldRowOf(input), filename, 30000);
+      if (res.ok) log(`→ attached ${filename}`);
+      else warn(`附件没上传成功: ${filename} — ${res.reason}`);
+      return { ok: res.ok, required, label: slotLabel, reason: res.reason };
     } catch (e) {
       warn("attach failed:", filename, e);
-      return false;
+      return { ok: false, required, label: slotLabel, reason: e?.message || String(e) };
     }
+  }
+
+  function fieldRowOf(el) {
+    return (el?.closest && el.closest(FIELD_ROW_SEL)) || el?.parentElement?.parentElement || el?.parentElement || el;
+  }
+
+  /**
+   * Poll the upload field until the file is listed AND nothing is still
+   * uploading. Clicking 保存 mid-upload loses the attachment, which is the
+   * whole point of this extension.
+   */
+  async function waitForUploadRegistered(scope, filename, timeoutMs) {
+    if (!scope) return { ok: false, reason: "找不到附件字段" };
+    const base = filename.replace(/\.[^.]+$/, "");
+    const listed = () => {
+      const list = scope.querySelector('[class*="file-list"], [class*="fileList"], [class*="upload-list"]');
+      if (list && list.children.length > 0) return true;
+      const txt = scope.textContent || "";
+      // UIs often ellipsize long names, so also accept a decent prefix.
+      return txt.includes(filename) || (base.length > 4 && txt.includes(base.slice(0, 5)));
+    };
+    const start = Date.now();
+    let seenAt = 0;
+    while (Date.now() - start < timeoutMs) {
+      if (scope.querySelector('[class*="upload-error"], [class*="upload-fail"]')) {
+        return { ok: false, reason: "上传组件报错" };
+      }
+      if (listed()) seenAt = seenAt || Date.now();
+      else seenAt = 0;
+      const busy = scope.querySelector('[class*="progress"], [class*="uploading"], [class*="upload-loading"]');
+      if (seenAt && !busy) return { ok: true, reason: null };
+      // Some builds leave a completed progress bar in the DOM forever; don't
+      // let that turn a finished upload into a false failure.
+      if (seenAt && Date.now() - seenAt > 3000) return { ok: true, reason: null };
+      await sleep(200);
+    }
+    return { ok: false, reason: seenAt ? "上传超时" : "文件没出现在附件列表里" };
   }
 
   function findFileInput(scope) {
@@ -1101,11 +1154,15 @@
   // Required fields carry a `required_xxxx` class on their row (TAE renders
   // the red star from it).
   function isRequiredField(el) {
-    let cur = el;
-    for (let i = 0; i < 6 && cur && cur !== document.body; i++) {
+    // Jump straight to the row: an upload slot's <input> can sit 6+ levels
+    // below it, deeper than any fixed-depth ancestor walk would reach.
+    const row = el?.closest ? el.closest(FIELD_ROW_SEL) : null;
+    if (row) {
+      return /required/i.test((row.className || "").toString())
+        || !!row.querySelector('[class*="required"]');
+    }
+    for (let cur = el, i = 0; i < 8 && cur && cur !== document.body; i++, cur = cur.parentElement) {
       if (/required/i.test((cur.className || "").toString())) return true;
-      if (cur.matches && cur.matches(FIELD_ROW_SEL)) return false;
-      cur = cur.parentElement;
     }
     return false;
   }
