@@ -25,7 +25,8 @@ const api = new Function(
   "global",
   body + `; return { detectType, guessTypeFromFilename, extractNights, detectAmount,
      detectDate, detectCurrency, normalizeCurrency, runHeuristics, buildNote,
-     extractCity, extractRoute, addDays, todayISO, isPlausibleAmount };`,
+     extractCity, extractRoute, addDays, todayISO, isPlausibleAmount,
+     sanitizeRefined, isSafeEndpoint, isValidIsoDate };`,
 )({});
 
 // detectAmount logs its candidate list; keep the test output readable.
@@ -103,12 +104,54 @@ eq("商户名", api.buildNote("meal", "太兴深圳宝安机场分店 餐饮", "
 eq("城市", api.extractCity("深圳宝安国际机场"), "深圳");
 eq("航线", api.extractRoute("PEK-PVG 航班"), "PEK-PVG");
 
-// todayISO 必须跟着本地时区走：UTC 版本会在 UTC+8 的凌晨给出昨天
+// todayISO 必须跟着本地时区走：UTC 版本会在 UTC+8 的凌晨给出昨天。
+// 把时钟和时区都钉死，否则这条断言只在一天中的某几个小时才有判别力
+// （容器跑在 UTC 时两者恰好相等，坏实现也能混过去）。
 {
   say("\ntodayISO（本地时区）:");
-  const local = new Date().toLocaleDateString("sv-SE");
-  eq("等于本地日期而不是 UTC 日期", api.todayISO(), local);
+  const TZ = process.env.TZ;
+  const RealDate = Date;
+  // UTC 2026-03-29 17:00 = 北京时间 2026-03-30 凌晨 1 点：两个日期不同。
+  const FIXED = RealDate.parse("2026-03-29T17:00:00Z");
+  process.env.TZ = "Asia/Shanghai";
+  globalThis.Date = class extends RealDate {
+    constructor(...args) { super(...(args.length ? args : [FIXED])); }
+    static now() { return FIXED; }
+  };
+  try {
+    eq("UTC+8 的凌晨给出的是今天而不是昨天", api.todayISO(), "2026-03-30");
+  } finally {
+    globalThis.Date = RealDate;
+    if (TZ === undefined) delete process.env.TZ; else process.env.TZ = TZ;
+  }
 }
+
+say("\n远程识别接口（可选，用户自配）:");
+eq("https 允许", api.isSafeEndpoint("https://ocr.example.com/parse"), true);
+eq("本机 http 允许（自建服务）", api.isSafeEndpoint("http://localhost:8000/parse"), true);
+eq("127.0.0.1 允许", api.isSafeEndpoint("http://127.0.0.1:8000/parse"), true);
+// 明文 http 会把票据图片和 Bearer key 一起裸奔发出去
+eq("外网 http 拒绝", api.isSafeEndpoint("http://ocr.example.com/parse"), false);
+eq("非法 URL 拒绝", api.isSafeEndpoint("不是地址"), false);
+eq("空值拒绝", api.isSafeEndpoint(""), false);
+
+say("\n远程返回值的清洗（接口是第三方代码，返回值直接进报销单）:");
+eq("整体非对象 → null", api.sanitizeRefined("oops"), null);
+eq("数组 → null", api.sanitizeRefined([1, 2]), null);
+eq("合法字段全部保留",
+  api.sanitizeRefined({ type: "hotel", date: "2026-03-29", amount: 684.44, currency: "cny", city: "深圳", nights: 2 }),
+  { type: "hotel", date: "2026-03-29", amount: 684.44, currency: "CNY", city: "深圳", nights: 2 });
+eq("未知类型被丢弃", api.sanitizeRefined({ type: "spaceship", amount: 10 }), { amount: 10 });
+eq("非数字金额被丢弃", api.sanitizeRefined({ amount: "abc" }), null);
+eq("数字字符串金额可接受", api.sanitizeRefined({ amount: "94.00" }), { amount: 94 });
+eq("负数金额被丢弃", api.sanitizeRefined({ amount: -5 }), null);
+eq("超大金额被丢弃", api.sanitizeRefined({ amount: 9e9 }), null);
+eq("非法日期被丢弃", api.sanitizeRefined({ date: "2026-02-31" }), null);
+eq("非 ISO 日期被丢弃", api.sanitizeRefined({ date: "03/29/2026" }), null);
+eq("不支持的币种被丢弃", api.sanitizeRefined({ currency: "XYZ" }), null);
+eq("夜数超界被丢弃", api.sanitizeRefined({ nights: 999 }), null);
+eq("城市被截断", api.sanitizeRefined({ city: "城".repeat(50) }).city.length, 20);
+eq("全是垃圾 → null", api.sanitizeRefined({ type: 1, date: 2, amount: {}, currency: [] }), null);
 
 say(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -1,0 +1,16 @@
+{
+  "name": "fliggyclaim",
+  "private": true,
+  "description": "FliggyClaim 报销助手 — Chrome 扩展。这个 package.json 只为跑测试而存在；扩展本身不打包、不依赖 npm。",
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "test:parser": "node scripts/test-parser.mjs",
+    "test:form": "node scripts/test-form-fill.mjs",
+    "test:popup": "node scripts/test-popup.mjs",
+    "build": "bash scripts/build.sh"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0"
+  }
+}
