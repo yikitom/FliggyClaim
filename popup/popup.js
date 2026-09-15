@@ -104,6 +104,7 @@ function bindUpload() {
   $("#clearAllBtn").addEventListener("click", () => {
     state.files.clear();
     renderFileList();
+    if (state.records.length) renderParsed();
   });
 
   $("#confirmParseBtn").addEventListener("click", parseAll);
@@ -143,6 +144,8 @@ function addFiles(files) {
     added++;
   }
   renderFileList();
+  // Adding files can clear a "没有这份原始文件" warning on an existing record.
+  if (added && state.records.length) renderParsed();
   if (added) toast(`已添加 ${added} 个文件${skipped ? `，跳过 ${skipped} 个` : ""}`);
   else if (skipped) toast(`跳过 ${skipped} 个不支持/重复的文件`, "error");
 }
@@ -364,6 +367,11 @@ function renderParsed() {
     src.textContent = rec.source || "";
     src.title = rec.source || "";
 
+    const refreshWarn = () => applyWarnings(node, state.records[idx]);
+    refreshWarn();
+    amtInp.addEventListener("input", refreshWarn);
+    typeSel.addEventListener("change", refreshWarn);
+
     node.querySelector(".remove-parsed").addEventListener("click", () => {
       state.records.splice(idx, 1);
       persistParsed();
@@ -374,6 +382,45 @@ function renderParsed() {
   });
 
   updateTotals();
+}
+
+/**
+ * Which parsed values does the user need to eyeball before importing?
+ *
+ * The amount is the one field nobody can sanity-check after the fact, and the
+ * parser's weakest sources are genuinely ambiguous: a filename like
+ * 「深圳酒店1晚68444.png」 yields 68444, not 684.44, whenever OCR is off or
+ * finds nothing. Surfacing the source beats silently claiming ¥68,444.
+ */
+function recordWarnings(rec) {
+  const out = [];
+  const amt = parseFloat(rec.amount);
+  if (!isFinite(amt) || amt <= 0) {
+    out.push("金额没识别出来，导入前请手动填写");
+  } else {
+    const src = rec._debug && rec._debug.amountSource;
+    if (src === "filename") out.push("金额是从文件名里猜的，请核对小数点");
+    else if (src === "bare-decimal") out.push("金额取自一个没有标签的数字，请核对");
+  }
+  if (rec.type === "hotel" && rec.source && !hasOriginalFile(rec.source)) {
+    out.push("酒店的凭证附件是必填，但这次没有这份原始文件（重开侧边栏后文件会丢失，请重新添加）");
+  }
+  return out;
+}
+
+function hasOriginalFile(name) {
+  for (const f of state.files.values()) if (f.name === name) return true;
+  return false;
+}
+
+function applyWarnings(node, rec) {
+  const warns = recordWarnings(rec);
+  const flag = node.querySelector(".warn-flag");
+  node.classList.toggle("is-warn", warns.length > 0);
+  if (flag) {
+    flag.hidden = warns.length === 0;
+    flag.title = warns.join("\n");
+  }
 }
 
 function updateTotals() {
@@ -456,6 +503,15 @@ async function withTab(fn, btnSel) {
 
 async function importToSystem() {
   if (state.records.length === 0) return;
+  // A record with no amount would be written as 0 and saved as a ¥0 claim —
+  // junk the user then has to hunt down in TAE. Make them fill it in first.
+  const zero = state.records
+    .map((r, i) => ({ i: i + 1, amt: parseFloat(r.amount) }))
+    .filter((r) => !isFinite(r.amt) || r.amt <= 0);
+  if (zero.length) {
+    toast(`第 ${zero.map((z) => z.i).join("、")} 条没有金额，填好后再导入`, "error");
+    return;
+  }
   try {
     await withTab(async (tab) => {
       const attachments = await buildAttachmentsMap(state.records);

@@ -201,6 +201,13 @@
         throw new Error(`「${res.label}」没上传成功（${rec.source}）：${res.reason}——该条已取消，未保存`);
       }
       if (!res.ok) warn(`附件未上传（非必填，继续保存）: ${rec.source} — ${res.reason}`);
+    } else {
+      // No file for this record at all. If the form demands one, 保存 would
+      // just fail validation and we'd report a mystery "等待 drawer close 超时".
+      const slot = requiredAttachmentSlot(form, formTitle);
+      if (slot) {
+        throw new Error(`「${slot}」是必填凭证，但没有拿到「${rec.source}」的原始文件（侧边栏重开后文件会丢失，请重新添加）——该条已取消，未保存`);
+      }
     }
 
     // 6. Click 保存 inside the form
@@ -260,6 +267,20 @@
       warn("attach failed:", filename, e);
       return { ok: false, required, label: slotLabel, reason: e?.message || String(e) };
     }
+  }
+
+  // The label of a required file slot in this form, or null if attachments
+  // are optional here.
+  function requiredAttachmentSlot(form, formTitle) {
+    const cands = [];
+    if (/住宿|酒店/.test(formTitle || "")) {
+      cands.push([LABELS.hotelReceipt[0], findFileInputByLabel(form, LABELS.hotelReceipt)]);
+    }
+    cands.push([LABELS.attachment[0], findFileInputByLabel(form, LABELS.attachment)]);
+    for (const [label, input] of cands) {
+      if (input && isRequiredField(input)) return label;
+    }
+    return null;
   }
 
   function fieldRowOf(el) {

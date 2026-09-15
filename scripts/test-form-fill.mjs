@@ -93,7 +93,7 @@ function load(kind, calendarOpts, uploadOpts) {
     "findFileInputByLabel", "findAddExpenseButton", "findCategoryPicker", "describeInput",
     "isVisible", "pickControl", "readComboSelection", "comboComponent", "sameAmount", "normText",
     "setDateLikeValue", "fillDate", "isRequiredField", "dateStuck",
-    "attachReceiptFile", "waitForUploadRegistered", "fieldRowOf",
+    "attachReceiptFile", "waitForUploadRegistered", "fieldRowOf", "requiredAttachmentSlot",
   ];
   const exports = `; return { LABELS, ${names
     .map((n) => `${n}: (typeof ${n} === "function" ? ${n} : null)`)
@@ -296,6 +296,13 @@ const rowOf = (label) => Array.from(document.querySelectorAll(".field_PlvYD"))
   input2.dispatchEvent(new window.Event("change", { bubbles: true }));
   const r2 = await api2.waitForUploadRegistered(api2.fieldRowOf(input2), "x.png", 3000);
   check("上传组件报错 → ok=false", r2.ok === false && /报错/.test(r2.reason || ""), JSON.stringify(r2));
+
+  const apiH = load("hotel");
+  check("酒店表单 → 「酒店住宿相关凭证」是必填槽位",
+    apiH.requiredAttachmentSlot(apiH.findCategoryForm(), "差旅-住宿") === "酒店住宿相关凭证");
+  const apiM = load("meal");
+  check("餐费表单 → 没有必填凭证槽位（缺附件也照常保存）",
+    apiM.requiredAttachmentSlot(apiM.findCategoryForm(), "差旅-餐费") === null);
 
   const api3 = load("hotel", null, { uploadMs: 200, stuckProgress: true });
   const input3 = document.getElementById("hotel-receipt");

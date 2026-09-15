@@ -605,6 +605,25 @@ body {
   grid-template-columns: 96px 56px 1fr;
 }
 
+/* A row whose amount came from a weak source (or is still 0) — the user
+   should eyeball it before importing. */
+.parsed-item.is-warn {
+  border-color: var(--warn, #d08700);
+  box-shadow: inset 2px 0 0 var(--warn, #d08700), var(--shadow-sm);
+}
+
+.warn-flag {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--warn, #d08700);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.parsed-row.third:has(.warn-flag:not([hidden])) {
+  grid-template-columns: auto 1fr auto;
+}
+
 .parsed-row.third {
   grid-template-columns: 1fr auto;
   gap: 8px;
