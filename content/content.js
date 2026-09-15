@@ -697,11 +697,14 @@
   }
 
   function addOneDay(iso) { return addNDays(iso, 1); }
+  // All-UTC arithmetic on a plain Y-M-D, so the result can't depend on the
+  // browser's timezone (mirrors lib/parser.js addDays).
   function addNDays(iso, days) {
-    if (!iso) return iso;
-    const d = new Date(iso);
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec((iso || "").trim());
+    if (!m) return iso;
+    const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
     if (isNaN(d.getTime())) return iso;
-    d.setDate(d.getDate() + (days || 0));
+    d.setUTCDate(d.getUTCDate() + (days || 0));
     return d.toISOString().slice(0, 10);
   }
 
