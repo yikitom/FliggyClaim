@@ -21,7 +21,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { pageHtml, installCalendarBehavior, installUploadBehavior } from "./fixtures/tae-page.js";
+import { pageHtml, installCalendarBehavior, installUploadBehavior, installComboBehavior } from "./fixtures/tae-page.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = process.env.FC_SRC || path.join(HERE, "..", "content", "content.js");
@@ -34,7 +34,7 @@ try {
   process.exit(2);
 }
 
-function load(kind, calendarOpts, uploadOpts) {
+function load(kind, calendarOpts, uploadOpts, comboOpts) {
   const { window } = new JSDOM(pageHtml(kind), { pretendToBeVisual: true });
 
   // jsdom does no layout, so every getBoundingClientRect() is 0×0 and
@@ -87,6 +87,7 @@ function load(kind, calendarOpts, uploadOpts) {
   const body = src.slice(src.indexOf(open) + open.length, src.lastIndexOf("})();"));
   if (calendarOpts) installCalendarBehavior(window, calendarOpts);
   if (uploadOpts) installUploadBehavior(window, uploadOpts);
+  if (comboOpts) installComboBehavior(window, comboOpts === true ? {} : comboOpts);
 
   const names = [
     "findCategoryForm", "isFormReady", "findAmountInput", "findControlByLabel", "collectLabelEls",
@@ -94,6 +95,7 @@ function load(kind, calendarOpts, uploadOpts) {
     "isVisible", "pickControl", "readComboSelection", "comboComponent", "sameAmount", "normText",
     "setDateLikeValue", "fillDate", "isRequiredField", "dateStuck",
     "attachReceiptFile", "waitForUploadRegistered", "fieldRowOf", "requiredAttachmentSlot",
+    "setComboByLabel", "fillCombo", "setComboboxValue", "verifyComboByLabel", "isRadioChosen",
   ];
   const exports = `; return { LABELS, ${names
     .map((n) => `${n}: (typeof ${n} === "function" ? ${n} : null)`)
@@ -310,6 +312,50 @@ const rowOf = (label) => Array.from(document.querySelectorAll(".field_PlvYD"))
   input3.dispatchEvent(new window.Event("change", { bubbles: true }));
   const r3 = await api3.waitForUploadRegistered(api3.fieldRowOf(input3), "x.png", 8000);
   check("进度条残留不会被误判成上传中", r3.ok === true, JSON.stringify(r3));
+}
+
+/* ---------- 下拉框：真正点开、过滤、选中 ---------- */
+{
+  console.log("\n币种下拉（当初那条 bug 的完整路径）:");
+  const api = load("meal", null, null, true);
+  const form = api.findCategoryForm();
+  const before = api.readComboSelection(api.comboComponent(
+    api.findControlByLabel(form, api.LABELS.currency, "combobox")));
+  check("初始停在报销单的默认币种 SGD", before === "SGD (新加坡元）", before);
+
+  const ok = await api.setComboByLabel(form, api.LABELS.currency, ["CNY", "CNY (人民币)"], "CNY");
+  const after = api.readComboSelection(api.comboComponent(
+    api.findControlByLabel(form, api.LABELS.currency, "combobox")));
+  check("选上 CNY 并返回 true（全角括号也能匹配）", ok === true && after === "CNY (人民币）", `${ok} ${after}`);
+
+  const bad = await api.setComboByLabel(form, api.LABELS.currency, ["XYZ"], "XYZ");
+  check("列表里没有的币种 → 返回 false，不谎报", bad === false);
+  const still = api.readComboSelection(api.comboComponent(
+    api.findControlByLabel(form, api.LABELS.currency, "combobox")));
+  check("选不上时不会把已选值弄丢", still === "CNY (人民币）", still);
+}
+{
+  console.log("\n必填的费用发生城市:");
+  const api = load("hotel", null, null, true);
+  const form = api.findCategoryForm();
+  const ok = await api.fillCombo(form, api.LABELS.city, ["深圳"], "深圳", "费用发生城市");
+  check("城市在列表里 → 选上", ok === true);
+
+  const api2 = load("hotel", null, null, true);
+  const form2 = api2.findCategoryForm();
+  let threw = null;
+  try {
+    await api2.fillCombo(form2, api2.LABELS.city, ["火星"], "火星", "费用发生城市");
+  } catch (e) { threw = e.message; }
+  check("猜错的城市（必填）→ 抛错取消该条，而不是保存时莫名超时",
+    !!threw && /费用发生城市/.test(threw) && /火星/.test(threw), threw || "没抛错");
+}
+{
+  console.log("\n单选框:");
+  const api = load("hotel");
+  const row = document.querySelector(".radio_2dhs9");
+  check("已选中的单选框能被识别", api.isRadioChosen(row, "有收据"));
+  check("没选中的不会被误判", !api.isRadioChosen(row, "无收据"));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -301,6 +301,96 @@ export function installUploadBehavior(window, opts = {}) {
   }
 }
 
+/**
+ * Emulate the kuma-select2 dropdown: the option list only exists while the
+ * widget is open, it is rendered at document level (not inside the field),
+ * and the typeahead <input> that filters it is display:none until then —
+ * which is exactly why dispatching events straight at that input did nothing.
+ *
+ * @param {Window} window
+ * @param {{options?: Record<string, string[]>, broken?: boolean}} opts
+ *   options keyed by the field's label text; fields without an entry stay inert
+ *   (the employee pickers, for instance).
+ */
+export function installComboBehavior(window, opts = {}) {
+  const { document } = window;
+  const {
+    options = {
+      币种: ["CNY (人民币）", "USD (美元）", "SGD (新加坡元）"],
+      费用发生城市: ["上海", "深圳", "杭州", "北京"],
+    },
+    broken = false,
+  } = opts;
+
+  const labelOf = (el) => {
+    const row = el.closest('[class*="field_"]');
+    return (row?.querySelector('[class*="label_"]')?.textContent || "").trim();
+  };
+
+  function closeDrop() {
+    document.querySelectorAll(".kuma-select2-drop").forEach((d) => d.remove());
+  }
+
+  function openDrop(component, list) {
+    closeDrop();
+    const drop = document.createElement("div");
+    drop.className = "kuma-select2-drop";
+    document.body.appendChild(drop);
+    const search = component.querySelector('input[class*="search__field"]');
+    // Opening reveals the typeahead input, as the real widget does.
+    const searchWrap = component.querySelector('[class*="kuma-select2-search"]');
+    if (searchWrap) searchWrap.style.display = "";
+
+    const render = () => {
+      const q = (search?.value || "").trim().toUpperCase();
+      const shown = list.filter((o) => !q || o.toUpperCase().includes(q));
+      drop.innerHTML = `<ul>${shown
+        .map((o) => `<li class="kuma-select2-results__option" role="option">${o}</li>`)
+        .join("")}</ul>`;
+      for (const li of drop.querySelectorAll("li")) {
+        li.addEventListener("click", () => {
+          const rendered = component.querySelector('[class*="selection__rendered"]');
+          let value = component.querySelector('[class*="selection-selected-value"]');
+          if (!value && rendered) {
+            // A never-touched widget has no value node at all — the real one
+            // creates it on first selection (see the 城市 field in the log).
+            value = document.createElement("div");
+            value.className = "kuma-select2-selection-selected-value";
+            rendered.prepend(value);
+          }
+          if (value) {
+            value.textContent = li.textContent;
+            value.setAttribute("title", li.textContent);
+            value.style.display = "block";
+          }
+          const placeholder = component.querySelector('[class*="selection__placeholder"]');
+          if (placeholder) placeholder.style.display = "none";
+          closeDrop();
+        });
+      }
+    };
+    render();
+    search?.addEventListener("input", render);
+  }
+
+  document.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.nodeType !== 1 || !t.closest) return;
+    const selection = t.closest('[class*="select2-selection"]');
+    if (!selection || broken) return;
+    // Climb to the widget root — closest() would match the selection box
+    // itself, whose class already contains "kuma-select2".
+    let component = selection;
+    while (component.parentElement && /kuma-select2|employee-search|select_/.test(
+      (component.parentElement.className || "").toString())) {
+      component = component.parentElement;
+    }
+    const list = options[labelOf(selection)];
+    if (!list) return;
+    openDrop(component, list);
+  });
+}
+
 /** @param {"meal"|"hotel"|"skeleton"|"picker"} kind */
 export function pageHtml(kind) {
   let drawer;

@@ -593,12 +593,23 @@
       if (isFlight) await fillDate(form, LABELS.flightDate, rec.date, "乘机日期");
     }
     // 城市 may exist on hotel/meal/taxi/other forms — try unconditionally.
-    await setComboByLabel(form, LABELS.city, [cityName], cityName);
+    // It IS required on the hotel form, so a wrong guess must fail loudly.
+    await fillCombo(form, LABELS.city, [cityName], cityName, "费用发生城市");
 
     if (isTaxi) {
       // 是否网约车 radio – default to 是
       const yes = findRadioByLabel(form, LABELS.rideshare, "是");
-      if (yes) clickEl(yes);
+      if (yes) {
+        clickEl(yes);
+        await sleep(150);
+        const row = fieldRowOf(yes);
+        if (!isRadioChosen(row, "是")) {
+          if (isRequiredField(yes)) {
+            throw new Error("「是否网约车」没能选上「是」——该条已取消，未保存");
+          }
+          warn("是否网约车 没选上（非必填，继续）");
+        }
+      }
     }
 
     // Currency MUST be set before amount: TAE clears the amount field
@@ -823,6 +834,16 @@
    *   textarea – textarea
    *   text/any – first usable control
    */
+  // Did clicking the option label actually select the radio?
+  function isRadioChosen(scope, optionText) {
+    if (!scope) return false;
+    return Array.from(scope.querySelectorAll('input[type="radio"]')).some((r) => {
+      if (!r.checked) return false;
+      const label = r.closest("label") || r.parentElement;
+      return (label?.textContent || "").includes(optionText);
+    });
+  }
+
   function pickControl(scope, kind) {
     if (!scope || !scope.querySelectorAll) return null;
     const vis = (sel) => Array.from(scope.querySelectorAll(sel)).filter(isVisible);
@@ -1230,6 +1251,25 @@
     return await setComboboxValue(combo, candidateTexts, wantCode);
   }
 
+  /**
+   * Set a dropdown and refuse the record if a REQUIRED one didn't take.
+   *
+   * 费用发生城市 is required on the hotel form and its value is a guess (parsed
+   * from the note, else 上海). When the guess isn't in TAE's option list the
+   * selection silently did nothing, 保存 was rejected by the validator, and the
+   * user got 「等待 drawer close 超时」 with no hint about which field.
+   */
+  async function fillCombo(form, labels, candidateTexts, wantCode, name) {
+    const combo = findControlByLabel(form, labels, "combobox");
+    if (!combo) return false;
+    const ok = await setComboboxValue(combo, candidateTexts, wantCode);
+    if (!ok && isRequiredField(combo)) {
+      throw new Error(`「${name}」选不上「${wantCode}」（不在可选列表里，请在侧边栏改成正确的值）——该条已取消，未保存`);
+    }
+    if (!ok) warn(`${name} 没选上（非必填，继续）:`, wantCode);
+    return ok;
+  }
+
   // Re-assert a dropdown that something else may have clobbered. Only acts
   // when we can read a selection that definitively differs from what we want.
   async function verifyComboByLabel(form, labels, candidateTexts, wantCode) {
@@ -1242,8 +1282,21 @@
     return await setComboboxValue(combo, candidateTexts, wantCode);
   }
 
+  // The whole select2 widget, not just the piece we were handed.
+  // closest() matches the element ITSELF, and the selection box's own class is
+  // "kuma-select2-selection …" — which contains "kuma-select2" — so the old
+  // closest() call handed back the selection box. Everything downstream then
+  // searched inside it: the click landed on __rendered and the selected-value
+  // lookup only worked because that node happens to live there too. Climb to
+  // the outermost node that is still part of the widget instead.
   function comboComponent(el) {
-    return el.closest('[class*="kuma-select2"], [class*="select_"], [class*="employee-search"]') || el.parentElement || el;
+    if (!el) return el;
+    const isWidget = (n) => /kuma-select2|kuma-employee-search|select_/.test((n?.className || "").toString());
+    let cur = el;
+    for (let i = 0; i < 6 && cur.parentElement && isWidget(cur.parentElement); i++) {
+      cur = cur.parentElement;
+    }
+    return cur;
   }
 
   /**
