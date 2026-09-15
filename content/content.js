@@ -216,9 +216,79 @@
     log("→ clicking 保存", saveBtn);
     clickEl(saveBtn);
 
-    // 7. Wait for drawer to close (form vanishes)
-    await waitFor(() => !findCategoryForm(), 6000, "drawer close");
+    // 7. Wait for drawer to close (form vanishes). If it doesn't, TAE rejected
+    // the record — say which field, instead of 「等待 drawer close 超时」.
+    try {
+      await waitFor(() => !findCategoryForm(), 6000, "drawer close");
+    } catch {
+      throw new Error(describeSaveFailure(findCategoryForm() || form));
+    }
     return { attached, amountFinal: fillOutcome?.amountFinal ?? null, amountInput: fillOutcome?.amountInput ?? null };
+  }
+
+  /* ---------- Save-failure diagnostics ---------- */
+
+  /**
+   * 保存 didn't close the drawer, so TAE refused the record. Report why.
+   *
+   * Two independent sources: the validation text the page itself rendered, and
+   * — because that markup varies between builds — a direct scan for required
+   * rows that are still empty. The latter also covers required fields this
+   * script doesn't know about at all.
+   */
+  function describeSaveFailure(form) {
+    if (!form) return "保存后抽屉没关闭，且找不到表单——请看页面上的报错";
+    const texts = [];
+    const push = (t) => {
+      const s = (t || "").trim();
+      if (s && s.length < 80 && !texts.includes(s)) texts.push(s);
+    };
+    for (const el of Array.from(form.querySelectorAll('[class*="error"], [class*="explain"], [class*="invalid"]'))) {
+      if (isVisible(el)) push(el.textContent);
+    }
+    for (const el of Array.from(document.querySelectorAll('[class*="kuma-message"], [class*="toast"], [role="alert"]'))) {
+      if (isVisible(el)) push(el.textContent);
+    }
+    const empty = emptyRequiredFields(form);
+    const parts = [];
+    if (texts.length) parts.push(texts.slice(0, 3).join("；"));
+    if (empty.length) parts.push(`仍为空的必填项：${empty.join("、")}`);
+    return parts.length
+      ? `保存被拒绝：${parts.join("；")}——该条未保存`
+      : "保存后抽屉没关闭（TAE 拒绝了这条，请看页面上的红色提示）——该条未保存";
+  }
+
+  // Labels of required rows whose control is still empty.
+  function emptyRequiredFields(form) {
+    const out = [];
+    for (const row of fieldRowsIn(form)) {
+      if (!/required/i.test((row.className || "").toString())) continue;
+      // Skip wrappers that contain other rows — only leaf field rows count.
+      if (fieldRowsIn(row).length > 0) continue;
+      const label = (row.querySelector('[class*="label"]')?.textContent || "").trim().replace(/^[*＊\s]+/, "");
+      if (!label || isRowFilled(row)) continue;
+      out.push(label.slice(0, 12));
+    }
+    return out;
+  }
+
+  function isRowFilled(row) {
+    for (const el of Array.from(row.querySelectorAll("input, textarea"))) {
+      const type = (el.type || "text").toLowerCase();
+      if (type === "file") {
+        if (el.files && el.files.length) return true;
+        continue;
+      }
+      if (type === "checkbox" || type === "radio") {
+        if (el.checked) return true;
+        continue;
+      }
+      if (BAD_CONTROL_CLS.test((el.className || "").toString())) continue;
+      if ((el.value || "").toString().trim()) return true;
+    }
+    if (readComboSelection(row)) return true;
+    const list = row.querySelector('[class*="file-list"], [class*="upload-list"]');
+    return !!(list && list.children.length);
   }
 
   /* ---------- File attachment ---------- */
@@ -284,7 +354,7 @@
   }
 
   function fieldRowOf(el) {
-    return (el?.closest && el.closest(FIELD_ROW_SEL)) || el?.parentElement?.parentElement || el?.parentElement || el;
+    return closestFieldRow(el) || el?.parentElement?.parentElement || el?.parentElement || el;
   }
 
   /**
@@ -453,11 +523,29 @@
   // A "field row" is TAE's one-label-one-control wrapper (`field_xxxx`), the
   // unit every label lookup must stay inside.
   const FIELD_ROW_SEL =
-    '[class*="field_"], [class*="field-"], [class*="formItem"], [class*="form-item"], [class*="FormItem"], .kuma-form-item';
+    '[class*="field"], [class*="formItem"], [class*="form-item"], [class*="FormItem"], .kuma-form-item';
+
+  // The CSS-module class is `field_<hash>`. A plain [class*="field_"] also
+  // matches select2's own `kuma-select2-search__field__wrap`, which made every
+  // "stay inside this field row" guard stop at the wrong element — and made
+  // emptyRequiredFields() skip the 费用发生城市 row as if it were a wrapper.
+  // Require the name to start a class token.
+  const FIELD_ROW_RE = /(?:^|\s)(?:field|formItem|form-item|FormItem)[_-][A-Za-z0-9-]+(?:\s|$)|(?:^|\s)kuma-form-item(?:\s|$)/;
+
+  function isFieldRow(el) {
+    return !!el && FIELD_ROW_RE.test((el.className || "").toString());
+  }
+
+  function closestFieldRow(el) {
+    for (let cur = el; cur && cur.nodeType === 1; cur = cur.parentElement) {
+      if (isFieldRow(cur)) return cur;
+    }
+    return null;
+  }
 
   function fieldRowsIn(el) {
     if (!el || !el.querySelectorAll) return [];
-    return Array.from(el.querySelectorAll(FIELD_ROW_SEL)).filter(isVisible);
+    return Array.from(el.querySelectorAll(FIELD_ROW_SEL)).filter((n) => isFieldRow(n) && isVisible(n));
   }
 
   // How much of a form body does this container hold? Prefer counting real
@@ -1201,7 +1289,7 @@
   function isRequiredField(el) {
     // Jump straight to the row: an upload slot's <input> can sit 6+ levels
     // below it, deeper than any fixed-depth ancestor walk would reach.
-    const row = el?.closest ? el.closest(FIELD_ROW_SEL) : null;
+    const row = closestFieldRow(el);
     if (row) {
       return /required/i.test((row.className || "").toString())
         || !!row.querySelector('[class*="required"]');

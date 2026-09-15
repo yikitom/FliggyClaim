@@ -96,6 +96,7 @@ function load(kind, calendarOpts, uploadOpts, comboOpts) {
     "setDateLikeValue", "fillDate", "isRequiredField", "dateStuck",
     "attachReceiptFile", "waitForUploadRegistered", "fieldRowOf", "requiredAttachmentSlot",
     "setComboByLabel", "fillCombo", "setComboboxValue", "verifyComboByLabel", "isRadioChosen",
+    "describeSaveFailure", "emptyRequiredFields", "isRowFilled",
   ];
   const exports = `; return { LABELS, ${names
     .map((n) => `${n}: (typeof ${n} === "function" ? ${n} : null)`)
@@ -356,6 +357,38 @@ const rowOf = (label) => Array.from(document.querySelectorAll(".field_PlvYD"))
   const row = document.querySelector(".radio_2dhs9");
   check("已选中的单选框能被识别", api.isRadioChosen(row, "有收据"));
   check("没选中的不会被误判", !api.isRadioChosen(row, "无收据"));
+}
+
+/* ---------- 保存被拒绝时说得清是哪个字段 ---------- */
+{
+  console.log("\n保存失败的诊断:");
+  const api = load("hotel", null, null, true);
+  const form = api.findCategoryForm();
+  const empty = api.emptyRequiredFields(form);
+  check("列出仍为空的必填项", ["费用发生城市", "入住时间", "金额"].every((l) => empty.includes(l)),
+    JSON.stringify(empty));
+  check("已选好的币种不算空", !empty.includes("币种"), JSON.stringify(empty));
+  check("已选中的单选框不算空", !empty.includes("收据类型"), JSON.stringify(empty));
+
+  const msg = api.describeSaveFailure(form);
+  check("错误信息点名字段，而不是「等待 drawer close 超时」",
+    /保存被拒绝/.test(msg) && /金额/.test(msg) && !/超时/.test(msg), msg);
+
+  // 页面自己渲染的校验文案优先
+  const row = document.querySelector(".field_PlvYD");
+  const err = document.createElement("div");
+  err.className = "kuma-form-explain error_2kd";
+  err.textContent = "请填写费用发生城市";
+  row.appendChild(err);
+  check("页面自己的报错也会被带上", /请填写费用发生城市/.test(api.describeSaveFailure(form)));
+}
+{
+  const api = load("meal", null, null, true);
+  const form = api.findCategoryForm();
+  const row = [...document.querySelectorAll(".field_PlvYD")]
+    .find((f) => f.querySelector(".label_3OUma")?.textContent.startsWith("金额"));
+  row.querySelector("input").value = "94";
+  check("填了值的行不再算空", api.isRowFilled(row));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
