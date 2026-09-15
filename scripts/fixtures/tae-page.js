@@ -154,6 +154,119 @@ const masterPane = () => `
     </div>
   </div>`;
 
+/**
+ * Emulate the uxcore/kuma date picker the real page uses: a READONLY input
+ * that ignores typing, plus a popup (rendered at document level) whose day
+ * cells are the only way to set a value.
+ *
+ * @param {Window} window
+ * @param {{openMonth?: string, titles?: boolean, panelInput?: boolean, broken?: boolean}} opts
+ *   openMonth  which month the popup opens on (default 2026-04, i.e. NOT the
+ *              month of the records in the log — the panel must be paged)
+ *   titles     render td[title="YYYY-MM-DD"] (false ⇒ day-number fallback)
+ *   panelInput give the popup its own editable input (rc-calendar's showDateInput)
+ *   broken     a picker that never opens — nothing can write the field
+ */
+export function installCalendarBehavior(window, opts = {}) {
+  const { document } = window;
+  const { openMonth = "2026-04", titles = true, panelInput = false, broken = false } = opts;
+  let bound = null;
+  let panel = null;
+  let cursor = openMonth;
+
+  const pad = (n) => String(n).padStart(2, "0");
+
+  function close() {
+    panel?.remove();
+    panel = null;
+  }
+
+  function render() {
+    const [y, m] = cursor.split("-").map(Number);
+    const days = new Date(y, m, 0).getDate();
+    panel.innerHTML = `
+      <div class="kuma-calendar">
+        <div class="kuma-calendar-header">
+          <a class="kuma-calendar-prev-month-btn"></a>
+          <span class="kuma-calendar-year-select">${y}年</span>
+          <span class="kuma-calendar-month-select">${m}月</span>
+          <a class="kuma-calendar-next-month-btn"></a>
+        </div>
+        ${panelInput ? `<div class="kuma-calendar-input-wrap"><input class="kuma-calendar-input" placeholder="请输入日期"></div>` : ""}
+        <table class="kuma-calendar-table"><tbody class="kuma-calendar-tbody"><tr>
+          <td class="kuma-calendar-cell kuma-calendar-last-month-cell"${titles ? ` title="${y}-${pad(m === 1 ? 12 : m - 1)}-28"` : ""}><div class="kuma-calendar-date">28</div></td>
+          ${Array.from({ length: days }, (_, i) => {
+            const d = i + 1;
+            return `<td class="kuma-calendar-cell"${titles ? ` title="${y}-${pad(m)}-${pad(d)}"` : ""}><div class="kuma-calendar-date">${d}</div></td>`;
+          }).join("")}
+        </tr></tbody></table>
+      </div>`;
+
+    panel.querySelector(".kuma-calendar-prev-month-btn").addEventListener("click", () => {
+      const [yy, mm] = cursor.split("-").map(Number);
+      cursor = mm === 1 ? `${yy - 1}-12` : `${yy}-${pad(mm - 1)}`;
+      render();
+    });
+    panel.querySelector(".kuma-calendar-next-month-btn").addEventListener("click", () => {
+      const [yy, mm] = cursor.split("-").map(Number);
+      cursor = mm === 12 ? `${yy + 1}-01` : `${yy}-${pad(mm + 1)}`;
+      render();
+    });
+    for (const td of panel.querySelectorAll("td")) {
+      td.addEventListener("click", () => {
+        if (td.className.includes("last-month")) return;
+        const [yy, mm] = cursor.split("-").map(Number);
+        commit(`${yy}-${pad(mm)}-${pad(Number(td.textContent.trim()))}`);
+      });
+    }
+    const typed = panel.querySelector(".kuma-calendar-input");
+    if (typed) {
+      typed.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(typed.value)) commit(typed.value);
+      });
+    }
+  }
+
+  function commit(iso) {
+    bound?.__commit?.(iso);
+    close();
+  }
+
+  // Model the real controlled input: React owns the value, so a programmatic
+  // write is dropped and only the widget can change what the field reads back.
+  // (Without this, jsdom would happily accept `input.value = "..."` and a
+  // "just type into the readonly box" regression would pass the tests.)
+  for (const input of document.querySelectorAll(".kuma-calendar-picker-input input")) {
+    let real = input.getAttribute("value") || "";
+    Object.defineProperty(input, "value", {
+      configurable: true,
+      get: () => real,
+      set: () => {},
+    });
+    input.__commit = (v) => { real = v; };
+  }
+
+  document.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.nodeType !== 1 || !t.closest) return;
+    const input = t.matches(".kuma-calendar-picker-input input") ? t : null;
+    const icon = t.matches(".kuma-calendar-trigger-icon")
+      ? t.parentElement.querySelector("input")
+      : null;
+    const hit = input || icon;
+    if (!hit) return;
+    if (broken) return;
+    if (panel) close();
+    bound = hit;
+    cursor = openMonth;
+    panel = document.createElement("div");
+    panel.className = "kuma-calendar-picker-container";
+    document.body.appendChild(panel);
+    render();
+  });
+}
+
 /** @param {"meal"|"hotel"|"skeleton"|"picker"} kind */
 export function pageHtml(kind) {
   let drawer;

@@ -509,21 +509,14 @@
     // Common fields
     const cityName = rec.city || extractCityFromNote(rec.note) || extractCityFromNote(rec.source) || "上海";
     if (isHotel) {
-      const ci = findControlByLabel(form, LABELS.checkin, "date");
       const checkinDate = rec.checkin || rec.date;
-      if (ci) await setDateLikeValue(ci, checkinDate);
-      const co = findControlByLabel(form, LABELS.checkout, "date");
-      const checkoutDate = rec.checkout || addNDays(checkinDate, rec.nights || 1);
-      if (co) await setDateLikeValue(co, checkoutDate);
+      await fillDate(form, LABELS.checkin, checkinDate, "入住时间");
+      await fillDate(form, LABELS.checkout, rec.checkout || addNDays(checkinDate, rec.nights || 1), "离店时间");
     } else {
       // 费用发生时间 (optional on most forms, required on none of the screenshots)
-      const dateEl = findControlByLabel(form, LABELS.date, "date");
-      if (dateEl) await setDateLikeValue(dateEl, rec.date);
+      await fillDate(form, LABELS.date, rec.date, "费用发生时间");
       // 乘机日期★ — only on the flight form, and it IS required.
-      if (isFlight) {
-        const fdEl = findControlByLabel(form, LABELS.flightDate, "date");
-        if (fdEl) await setDateLikeValue(fdEl, rec.date);
-      }
+      if (isFlight) await fillDate(form, LABELS.flightDate, rec.date, "乘机日期");
     }
     // 城市 may exist on hotel/meal/taxi/other forms — try unconditionally.
     await setComboByLabel(form, LABELS.city, [cityName], cityName);
@@ -594,6 +587,19 @@
     const note = findControlByLabel(form, LABELS.note, "textarea") || findControlByLabel(form, LABELS.note, "text");
     if (note) await setInputValue(note, rec.note || "");
     return outcome;
+  }
+
+  // A required date that silently stayed empty used to sail through to 保存;
+  // refuse the record instead, the same way we refuse an unwritten 金额.
+  async function fillDate(form, labels, iso, name) {
+    const el = findControlByLabel(form, labels, "date");
+    if (!el || !iso) return false;
+    const ok = await setDateLikeValue(el, iso);
+    if (!ok && isRequiredField(el)) {
+      throw new Error(`「${name}」没能写入（${iso}）——该条已取消，未保存`);
+    }
+    if (!ok) warn(`${name} 没写进去（非必填，继续）:`, iso);
+    return ok;
   }
 
   function sameAmount(got, want) {
@@ -952,21 +958,156 @@
   }
 
 
+  // Did the field actually end up on this date? Compares the numbers in the
+  // input's value, so 2026-03-30 / 2026/03/30 / 2026年3月30日 all count.
+  function dateStuck(el, iso) {
+    const [y, m, d] = iso.split("-").map(Number);
+    const n = ((el?.value || "").match(/\d+/g) || []).map(Number);
+    return n.length >= 3 && n[0] === y && n[1] === m && n[2] === d;
+  }
+
+  function visibleCalendarPanels() {
+    return Array.from(
+      document.querySelectorAll('[class*="calendar-picker-container"], [class*="calendar"], [class*="Calendar"]'),
+    )
+      .filter(isVisible)
+      // The field's own <span class="kuma-calendar-picker-input"> also matches
+      // the class filter; only the popup has day cells.
+      .filter((p) => p.querySelector('td, [class*="calendar-date"], [class*="calendar-cell"]'));
+  }
+
+  async function openCalendarPanel(el) {
+    const before = visibleCalendarPanels();
+    clickEl(el);
+    try { el.focus(); } catch {}
+    const trigger = el.parentElement?.querySelector('[class*="calendar-trigger"], [class*="uxicon-riqi"]');
+    const start = Date.now();
+    while (Date.now() - start < 1500) {
+      const panel = visibleCalendarPanels().find((p) => !before.includes(p)) || visibleCalendarPanels()[0];
+      if (panel) return panel;
+      if (trigger && Date.now() - start > 300) clickEl(trigger);
+      await sleep(100);
+    }
+    return null;
+  }
+
+  function closeCalendarPanel(el) {
+    try {
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, keyCode: 27 }));
+    } catch {}
+    if (visibleCalendarPanels().length) document.body.click();
+  }
+
+  // Header reads like 「2026年 3月」 or 「2026 Mar」.
+  function readPanelYearMonth(panel) {
+    const head = panel.querySelector(
+      '[class*="month-select"], [class*="year-select"], [class*="calendar-header"], [class*="month-panel-header"]',
+    ) || panel;
+    const nums = ((head.textContent || "").match(/\d+/g) || []).map(Number);
+    const year = nums.find((v) => v > 1900 && v < 2200);
+    const month = nums.find((v) => v >= 1 && v <= 12 && v !== year);
+    return year && month ? { year, month } : null;
+  }
+
+  // The picker opens on today (or on the current value), so a record from
+  // another month has no cell to click until we page the panel there.
+  async function navigateCalendarTo(panel, y, m) {
+    for (let i = 0; i < 24; i++) {
+      const cur = readPanelYearMonth(panel);
+      if (!cur) return false;
+      const diff = (y - cur.year) * 12 + (m - cur.month);
+      if (diff === 0) return true;
+      const btn = panel.querySelector(
+        diff > 0
+          ? '[class*="next-month-btn"], [class*="next-month"]'
+          : '[class*="prev-month-btn"], [class*="prev-month"]',
+      );
+      if (!btn) return false;
+      clickEl(btn);
+      await sleep(120);
+    }
+    return false;
+  }
+
+  function findDayCell(panel, iso) {
+    const [y, m, d] = iso.split("-").map(Number);
+    const cells = Array.from(
+      panel.querySelectorAll('td[title], td, [role="gridcell"], [class*="calendar-cell"]'),
+    ).filter(isVisible);
+    const byTitle = cells.find((c) => {
+      const n = ((c.getAttribute("title") || "").match(/\d+/g) || []).map(Number);
+      return n.length >= 3 && n[0] === y && n[1] === m && n[2] === d;
+    });
+    if (byTitle) return byTitle;
+    // No usable title: match the day number, skipping the greyed-out cells
+    // that belong to the neighbouring months.
+    return cells.find((c) => {
+      const cls = (c.className || "").toString();
+      if (/last-month|next-month|prev-month|disabled|selected-day/i.test(cls)) return false;
+      return (c.textContent || "").trim() === String(d);
+    }) || null;
+  }
+
+  /**
+   * TAE's date fields are READONLY <input>s driven by a calendar popup, so the
+   * old implementation — focus, type the ISO string, type it again with
+   * slashes, press Enter — could not write anything, and it returned true
+   * regardless. The 2026-04-26 dump shows the result: 费用发生时间 still empty
+   * on a record reported as ✓. Drive the actual widget instead, and report
+   * honestly whether the date landed.
+   */
   async function setDateLikeValue(el, iso) {
     if (!el || !iso) return false;
-    if (el.type === "date") return await setInputValue(el, iso);
+    if (el.type === "date") {
+      await setInputValue(el, iso);
+      return dateStuck(el, iso);
+    }
+    // A genuinely editable date field: typing is still the cheapest path.
+    if (!el.readOnly) {
+      await setInputValue(el, iso);
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, keyCode: 13 }));
+      await sleep(200);
+      if (dateStuck(el, iso)) return true;
+    }
+    const [y, m] = iso.split("-").map(Number);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const panel = await openCalendarPanel(el);
+      if (!panel) break;
+      // (a) rc-calendar's popup carries its own editable input — the only path
+      //     that works regardless of which month the panel happens to show.
+      const typed = Array.from(panel.querySelectorAll("input:not([readonly]):not([disabled])")).filter(isVisible)[0];
+      if (typed) {
+        await setInputValue(typed, iso);
+        await sleep(150);
+        typed.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, keyCode: 13 }));
+        await sleep(250);
+        if (dateStuck(el, iso)) { closeCalendarPanel(el); return true; }
+      }
+      // (b) click the day cell, paging to the right month first.
+      await navigateCalendarTo(panel, y, m);
+      const cell = findDayCell(panel, iso);
+      if (cell) {
+        clickEl(cell);
+        await sleep(250);
+        if (dateStuck(el, iso)) { closeCalendarPanel(el); return true; }
+      }
+      closeCalendarPanel(el);
+      await sleep(150);
+    }
+    warn("日期没能写入:", iso, describeInput(el));
+    return false;
+  }
 
-    el.focus();
-    el.click();
-    await setInputValue(el, iso);
-    await sleep(200);
-    // Some pickers want YYYY/MM/DD typed
-    await setInputValue(el, iso.replaceAll("-", "/"));
-    await sleep(150);
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    // close the picker by clicking elsewhere
-    document.body.click();
-    return true;
+  // Required fields carry a `required_xxxx` class on their row (TAE renders
+  // the red star from it).
+  function isRequiredField(el) {
+    let cur = el;
+    for (let i = 0; i < 6 && cur && cur !== document.body; i++) {
+      if (/required/i.test((cur.className || "").toString())) return true;
+      if (cur.matches && cur.matches(FIELD_ROW_SEL)) return false;
+      cur = cur.parentElement;
+    }
+    return false;
   }
 
   // Compare display text width-insensitively: TAE renders 「CNY (人民币）」 with

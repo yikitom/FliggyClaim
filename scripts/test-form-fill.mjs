@@ -21,7 +21,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { pageHtml } from "./fixtures/tae-page.js";
+import { pageHtml, installCalendarBehavior } from "./fixtures/tae-page.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = process.env.FC_SRC || path.join(HERE, "..", "content", "content.js");
@@ -34,7 +34,7 @@ try {
   process.exit(2);
 }
 
-function load(kind) {
+function load(kind, calendarOpts) {
   const { window } = new JSDOM(pageHtml(kind), { pretendToBeVisual: true });
 
   // jsdom does no layout, so every getBoundingClientRect() is 0×0 and
@@ -61,7 +61,8 @@ function load(kind) {
   for (const k of [
     "getComputedStyle", "HTMLInputElement", "HTMLElement", "Element", "Node", "InputEvent",
     "Event", "MouseEvent", "KeyboardEvent", "FocusEvent", "CSS", "DataTransfer", "File",
-    "requestAnimationFrame", "setTimeout", "clearTimeout",
+    // NB: never alias setTimeout/clearTimeout here — jsdom's timers call the
+    // environment's global ones, so aliasing them makes jsdom recurse forever.
   ]) globalThis[k] = window[k];
   globalThis.window = window;
   globalThis.document = window.document;
@@ -74,10 +75,13 @@ function load(kind) {
   const src = fs.readFileSync(SRC, "utf8");
   const open = "(() => {";
   const body = src.slice(src.indexOf(open) + open.length, src.lastIndexOf("})();"));
+  if (calendarOpts) installCalendarBehavior(window, calendarOpts);
+
   const names = [
     "findCategoryForm", "isFormReady", "findAmountInput", "findControlByLabel", "collectLabelEls",
     "findFileInputByLabel", "findAddExpenseButton", "findCategoryPicker", "describeInput",
     "isVisible", "pickControl", "readComboSelection", "comboComponent", "sameAmount", "normText",
+    "setDateLikeValue", "fillDate", "isRequiredField", "dateStuck",
   ];
   const exports = `; return { LABELS, ${names
     .map((n) => `${n}: (typeof ${n} === "function" ? ${n} : null)`)
@@ -178,6 +182,68 @@ const rowOf = (label) => Array.from(document.querySelectorAll(".field_PlvYD"))
   check("勾选框的 'on' 不算 684.44", !api.sameAmount("on", 684.44));
   check("'684.44' == 684.44", api.sameAmount("684.44", 684.44));
   check("'1,234.50' == 1234.5", api.sameAmount("1,234.50", 1234.5));
+}
+
+/* ---------- 日期：readonly 输入框只能靠日历面板写 ---------- */
+{
+  console.log("\n日期写入（kuma 日历，输入框 readonly）:");
+  // 面板默认停在 2026-04，记录是 2026-03-30 —— 必须翻月
+  const api = load("meal", { openMonth: "2026-04" });
+  const form = api.findCategoryForm();
+  const el = api.findControlByLabel(form, api.LABELS.date, "date");
+  check("拿到的是 readonly 的日历输入框", !!el && el.readOnly);
+  check("写入前是空的", el.value === "");
+  const ok = await api.setDateLikeValue(el, "2026-03-30");
+  check("setDateLikeValue 返回 true", ok === true);
+  check("值真的落到了 2026-03-30", el.value === "2026-03-30", `got "${el.value}"`);
+  check("日历面板已关闭", !document.querySelector(".kuma-calendar-picker-container"));
+}
+{
+  console.log("\n日期：同月 / 无 title / 面板自带输入框:");
+  {
+    const api = load("meal", { openMonth: "2026-03" });
+    const el = api.findControlByLabel(api.findCategoryForm(), api.LABELS.date, "date");
+    await api.setDateLikeValue(el, "2026-03-30");
+    check("同月直接点单元格", el.value === "2026-03-30", `got "${el.value}"`);
+  }
+  {
+    const api = load("meal", { openMonth: "2026-04", titles: false });
+    const el = api.findControlByLabel(api.findCategoryForm(), api.LABELS.date, "date");
+    await api.setDateLikeValue(el, "2026-03-30");
+    check("单元格没有 title 时按日号兜底", el.value === "2026-03-30", `got "${el.value}"`);
+  }
+  {
+    const api = load("meal", { openMonth: "2026-04", panelInput: true });
+    const el = api.findControlByLabel(api.findCategoryForm(), api.LABELS.date, "date");
+    await api.setDateLikeValue(el, "2026-03-30");
+    check("面板自带输入框时直接输入", el.value === "2026-03-30", `got "${el.value}"`);
+  }
+}
+{
+  console.log("\n日期写不进去时:");
+  const api = load("hotel", { broken: true });
+  const form = api.findCategoryForm();
+  const el = api.findControlByLabel(form, api.LABELS.checkin, "date");
+  check("setDateLikeValue 如实返回 false", (await api.setDateLikeValue(el, "2026-03-29")) === false);
+  check("入住时间被识别为必填", api.isRequiredField(el));
+  check("费用发生时间（选填）不被误判为必填",
+    !api.isRequiredField(load("meal").findControlByLabel(load("meal").findCategoryForm(), api.LABELS.date, "date")));
+  let threw = null;
+  try {
+    await api.fillDate(form, api.LABELS.checkin, "2026-03-29", "入住时间");
+  } catch (e) { threw = e.message; }
+  check("必填日期写不进去 → 抛错，不保存该条", !!threw && /入住时间/.test(threw), threw || "没抛错");
+}
+{
+  console.log("\n选填日期写不进去时:");
+  const api = load("meal", { broken: true });
+  const form = api.findCategoryForm();
+  let threw = null;
+  try {
+    const r = await api.fillDate(form, api.LABELS.date, "2026-03-30", "费用发生时间");
+    check("返回 false 而不是抛错", r === false);
+  } catch (e) { threw = e.message; }
+  check("选填日期失败不影响这条记录", !threw, threw || "");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
